@@ -1,3 +1,8 @@
+# generative sampling methods survery
+We're running multiple methods and comparing
+
+This is the old readme:
+
 ## One-Step Diffusion via Shortcut Models 
 
 Kevin Frans, Danijar Hafner, Sergey Levine, Pieter Abbeel
