@@ -1,35 +1,36 @@
-import jax
-import jax.numpy as jnp
-import numpy as np
+# targets_naive_torch.py
+import torch
+import math
 
-def get_targets(FLAGS, key, train_state, images, labels, force_t=-1, force_dt=-1):
-    label_key, time_key, noise_key = jax.random.split(key, 3)
+@torch.no_grad()
+def get_targets(FLAGS, gen, call_model, images, labels, force_t=-1, force_dt=-1):
     info = {}
+    B = images.shape[0]
+    device = images.device
 
-    labels_dropout = jax.random.bernoulli(label_key, FLAGS.model['class_dropout_prob'], (labels.shape[0],))
-    labels_dropped = jnp.where(labels_dropout, FLAGS.model['num_classes'], labels)
-    info['dropped_ratio'] = jnp.mean(labels_dropped == FLAGS.model['num_classes'])
+    # label dropout for CFG
+    mask = torch.bernoulli(torch.full((B,), FLAGS.model['class_dropout_prob'], device=device)).bool()
+    labels_dropped = torch.where(mask, torch.full_like(labels, FLAGS.model['num_classes']), labels)
+    info['dropped_ratio'] = (labels_dropped == FLAGS.model['num_classes']).float().mean()
 
-    # Sample t.
-    t = jax.random.randint(time_key, (images.shape[0],), minval=0, maxval=FLAGS.model['denoise_timesteps']).astype(jnp.float32)
-    t /= FLAGS.model['denoise_timesteps']
-    force_t_vec = jnp.ones(images.shape[0], dtype=jnp.float32) * force_t
-    t = jnp.where(force_t_vec != -1, force_t_vec, t)         # If force_t is not -1, then use force_t.
-    t_full = t[:, None, None, None] # [batch, 1, 1, 1]
+    # t in [0,1]
+    t = torch.randint(0, FLAGS.model['denoise_timesteps'], (B,), generator=gen, device=device).float()
+    t = t / float(FLAGS.model['denoise_timesteps'])
+    if force_t != -1:
+        t = torch.full_like(t, float(force_t))
+    t_full = t.view(B, 1, 1, 1)
 
-    # Sample flow pairs x_t, v_t.
+    # flow pairs
     if 'latent' in FLAGS.dataset_name:
-        x_0 = images[..., :images.shape[-1] // 2]
-        x_1 = images[..., images.shape[-1] // 2:]
-        x_t = (1 - (1 - 1e-5) * t_full) * x_0 + t_full * x_1
-        v_t = x_1 - (1 - 1e-5) * x_0
+        x0 = images[..., :images.shape[-1] // 2]
+        x1 = images[..., images.shape[-1] // 2:]
     else:
-        x_1 = images
-        x_0 = jax.random.normal(noise_key, images.shape)
-        x_t = (1 - (1 - 1e-5) * t_full) * x_0 + t_full * x_1
-        v_t = x_1 - (1 - 1e-5) * x_0
+        x1 = images
+        x0 = torch.randn_like(images, generator=gen)
+    x_t = (1.0 - (1.0 - 1e-5) * t_full) * x0 + t_full * x1
+    v_t = x1 - (1.0 - 1e-5) * x0
 
-    dt_flow = np.log2(FLAGS.model['denoise_timesteps']).astype(jnp.int32)
-    dt_base = jnp.ones(images.shape[0], dtype=jnp.int32) * dt_flow
+    dt_flow = int(math.log2(FLAGS.model['denoise_timesteps']))
+    dt_base = torch.full((B,), dt_flow, device=device, dtype=torch.float32)
 
     return x_t, v_t, t, dt_base, labels_dropped, info

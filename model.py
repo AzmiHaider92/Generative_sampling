@@ -1,291 +1,261 @@
+# model(torch).py
+from dataclasses import dataclass
+from typing import Dict, Tuple, Optional
 import math
-from typing import Any, Callable, Optional, Tuple, Type, Sequence, Union
-import flax.linen as nn
-import jax
-import jax.numpy as jnp
-from einops import rearrange
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-Array = Any
-PRNGKey = Any
-Shape = Tuple[int]
-Dtype = Any
+# ------- Positional encodings (2D sin-cos) -------
+def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
+    assert embed_dim % 2 == 0
+    omega = torch.arange(embed_dim // 2, dtype=torch.float32, device=pos.device)
+    omega = 1.0 / (10000 ** (omega / (embed_dim / 2)))
+    out = torch.einsum('m,d->md', pos.reshape(-1), omega)
+    emb = torch.cat([torch.sin(out), torch.cos(out)], dim=1)
+    return emb
 
-from math_utils import get_2d_sincos_pos_embed, modulate
-from jax._src import core
-from jax._src import dtypes
-from jax._src.nn.initializers import _compute_fans
+def get_2d_sincos_pos_embed(embed_dim, length, device):
+    grid_size = int(length ** 0.5)
+    assert grid_size * grid_size == length
+    grid_h = torch.arange(grid_size, dtype=torch.float32, device=device)
+    grid_w = torch.arange(grid_size, dtype=torch.float32, device=device)
+    gh, gw = torch.meshgrid(grid_h, grid_w, indexing='ij')
+    grid = torch.stack([gh.reshape(-1), gw.reshape(-1)], dim=0)  # [2, H*W]
+    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])
+    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])
+    emb = torch.cat([emb_h, emb_w], dim=1)  # [H*W, D]
+    return emb.unsqueeze(0)  # [1, H*W, D]
 
-def xavier_uniform_pytorchlike():
-    def init(key, shape, dtype):
-        dtype = dtypes.canonicalize_dtype(dtype)
-        named_shape = core.as_named_shape(shape)
-        if len(shape) == 2: # Dense, [in, out]
-            fan_in = shape[0]
-            fan_out = shape[1]
-        elif len(shape) == 4: # Conv, [k, k, in, out]. Assumes patch-embed style conv.
-            fan_in = shape[0] * shape[1] * shape[2]
-            fan_out = shape[3]
-        else:
-            raise ValueError(f"Invalid shape {shape}")
-
-        variance = 2 / (fan_in + fan_out)
-        scale = jnp.sqrt(3 * variance)
-        param = jax.random.uniform(key, shape, dtype, -1) * scale
-
-        return param
-    return init
-
-
-class TrainConfig:
-    def __init__(self, dtype):
-        self.dtype = dtype
-    def kern_init(self, name='default', zero=False):
-        if zero or 'bias' in name:
-            return nn.initializers.constant(0)
-        return xavier_uniform_pytorchlike()
-    def default_config(self):
-        return {
-            'kernel_init': self.kern_init(),
-            'bias_init': self.kern_init('bias', zero=True),
-            'dtype': self.dtype,
-        }
-
-class TimestepEmbedder(nn.Module):
-    """
-    Embeds scalar timesteps into vector representations.
-    """
-    hidden_size: int
-    tc: TrainConfig
-    frequency_embedding_size: int = 256
-
-    @nn.compact
-    def __call__(self, t):
-        x = self.timestep_embedding(t)
-        x = nn.Dense(self.hidden_size, kernel_init=nn.initializers.normal(0.02), 
-                     bias_init=self.tc.kern_init('time_bias'), dtype=self.tc.dtype)(x)
-        x = nn.silu(x)
-        x = nn.Dense(self.hidden_size, kernel_init=nn.initializers.normal(0.02), 
-                     bias_init=self.tc.kern_init('time_bias'))(x)
-        return x
-    
-    # t is between [0, 1].
-    def timestep_embedding(self, t, max_period=10000):
-        """
-        Create sinusoidal timestep embeddings.
-        :param t: a 1-D Tensor of N indices, one per batch element.
-                            These may be fractional.
-        :param dim: the dimension of the output.
-        :param max_period: controls the minimum frequency of the embeddings.
-        :return: an (N, D) Tensor of positional embeddings.
-        """
-        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
-        t = jax.lax.convert_element_type(t, jnp.float32)
-        # t = t * max_period
-        dim = self.frequency_embedding_size
-        half = dim // 2
-        freqs = jnp.exp( -math.log(max_period) * jnp.arange(start=0, stop=half, dtype=jnp.float32) / half)
-        args = t[:, None] * freqs[None]
-        embedding = jnp.concatenate([jnp.cos(args), jnp.sin(args)], axis=-1)
-        embedding = embedding.astype(self.tc.dtype)
-        return embedding
-    
-class LabelEmbedder(nn.Module):
-    """
-    Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
-    """
-    num_classes: int
-    hidden_size: int
-    tc: TrainConfig
-
-    @nn.compact
-    def __call__(self, labels):
-        embedding_table = nn.Embed(self.num_classes + 1, self.hidden_size, 
-                                   embedding_init=nn.initializers.normal(0.02), dtype=self.tc.dtype)
-        embeddings = embedding_table(labels)
-        return embeddings
-    
-class PatchEmbed(nn.Module):
-    """ 2D Image to Patch Embedding """
-    patch_size: int
-    hidden_size: int
-    tc: TrainConfig
-    bias: bool = True
-
-    @nn.compact
-    def __call__(self, x):
-        B, H, W, C = x.shape
-        patch_tuple = (self.patch_size, self.patch_size)
-        num_patches = (H // self.patch_size)
-        x = nn.Conv(self.hidden_size, patch_tuple, patch_tuple, use_bias=self.bias, padding="VALID",
-                     kernel_init=self.tc.kern_init('patch'), bias_init=self.tc.kern_init('patch_bias', zero=True),
-                     dtype=self.tc.dtype)(x) # (B, P, P, hidden_size)
-        x = rearrange(x, 'b h w c -> b (h w) c', h=num_patches, w=num_patches)
-        return x
-    
-class MlpBlock(nn.Module):
-    """Transformer MLP / feed-forward block."""
-    mlp_dim: int
-    tc: TrainConfig
-    out_dim: Optional[int] = None
-    dropout_rate: float = None
-    train: bool = False
-
-    @nn.compact
-    def __call__(self, inputs):
-        """It's just an MLP, so the input shape is (batch, len, emb)."""
-        actual_out_dim = inputs.shape[-1] if self.out_dim is None else self.out_dim
-        x = nn.Dense(features=self.mlp_dim, **self.tc.default_config())(inputs)
-        x = nn.gelu(x)
-        x = nn.Dropout(rate=self.dropout_rate, deterministic=(not self.train))(x)
-        output = nn.Dense(features=actual_out_dim, **self.tc.default_config())(x)
-        output = nn.Dropout(rate=self.dropout_rate, deterministic=(not self.train))(output)
-        return output
-    
+# ------- Small helpers -------
 def modulate(x, shift, scale):
-    # scale = jnp.clip(scale, -1, 1)
-    return x * (1 + scale[:, None]) + shift[:, None]
-    
-################################################################################
-#                                 Core DiT Model                                #
-#################################################################################
+    # Match your JAX model.py version (no clipping inside modulate).
+    # (You also had a clipped version in math_utils.py—this mirrors model.py.)
+    # x: [B, L, C], shift/scale: [B, C]
+    return x * (1 + scale[:, None, :]) + shift[:, None, :]
+
+@dataclass
+class TrainConfig:
+    dtype: torch.dtype = torch.bfloat16
+    def default_kwargs(self):
+        return dict(dtype=self.dtype)
+
+# ------- Building blocks -------
+class TimestepEmbedder(nn.Module):
+    def __init__(self, hidden_size: int, tc: TrainConfig, freq_size: int = 256):
+        super().__init__()
+        self.hidden = hidden_size
+        self.freq = freq_size
+        self.tc = tc
+        self.fc1 = nn.Linear(self.freq, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+
+    def forward(self, t):  # t in [0,1], shape [B]
+        t = t.to(torch.float32)
+        half = self.freq // 2
+        freqs = torch.exp(-math.log(10000) * torch.arange(0, half, device=t.device, dtype=torch.float32) / half)
+        args = t[:, None] * freqs[None, :]
+
+        # build emb in fp32, then cast to fc1’s weight dtype
+        emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        emb = emb.to(self.fc1.weight.dtype)
+
+        x = F.silu(self.fc1(emb))
+        x = self.fc2(x)
+
+        # (optional) cast output to tc.dtype if the rest of your net expects it
+        if hasattr(self.tc, "dtype") and self.tc.dtype is not None and x.dtype != self.tc.dtype:
+            x = x.to(self.tc.dtype)
+        return x
+
+class LabelEmbedder(nn.Module):
+    def __init__(self, num_classes: int, hidden_size: int, tc: TrainConfig):
+        super().__init__()
+        self.emb = nn.Embedding(num_classes + 1, hidden_size)  # +1 for null token
+        self.tc = tc
+    def forward(self, labels):  # [B] int64
+        return self.emb(labels)
+
+
+class PatchEmbed(nn.Module):
+    def __init__(self, in_channels: int, patch_size: int, hidden_size: int, tc: TrainConfig, bias: bool = True):
+        super().__init__()
+        self.patch = patch_size
+        self.tc = tc
+        self.proj = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=hidden_size,
+            kernel_size=patch_size,
+            stride=patch_size,
+            padding=0,
+            bias=bias
+        )
+
+    def forward(self, x_bhwc):
+        B, H, W, C = x_bhwc.shape
+        x = x_bhwc.permute(0,3,1,2).contiguous()
+        x = self.proj(x)
+        x = x.flatten(2).transpose(1,2)
+        return x, (H // self.proj.kernel_size[0], W // self.proj.kernel_size[0])
+
+
+class MlpBlock(nn.Module):
+    def __init__(self, hidden: int, mlp_ratio: float, dropout: float, tc: TrainConfig):
+        super().__init__()
+        inner = int(hidden * mlp_ratio)
+        self.fc1 = nn.Linear(hidden, inner)
+        self.fc2 = nn.Linear(inner, hidden)
+        self.drop = nn.Dropout(dropout)
+    def forward(self, x):
+        x = self.drop(F.gelu(self.fc1(x), approximate="tanh"))
+        x = self.drop(self.fc2(x))
+        return x
 
 class DiTBlock(nn.Module):
-    """
-    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
-    """
-    hidden_size: int
-    num_heads: int
-    tc: TrainConfig
-    mlp_ratio: float = 4.0
-    dropout: float = 0.0
-    train: bool = False
+    def __init__(self, hidden: int, heads: int, mlp_ratio: float, dropout: float, tc: TrainConfig):
+        super().__init__()
+        self.hidden = hidden
+        self.heads = heads
+        self.tc = tc
+        self.norm1 = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.q = nn.Linear(hidden, hidden)
+        self.k = nn.Linear(hidden, hidden)
+        self.v = nn.Linear(hidden, hidden)
+        self.proj = nn.Linear(hidden, hidden)
+        self.norm2 = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.mlp = MlpBlock(hidden, mlp_ratio, dropout, tc)
 
-    # @functools.partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
-    @nn.compact
-    def __call__(self, x, c):
-        # Calculate adaLn modulation parameters.
-        c = nn.silu(c)
-        c = nn.Dense(6 * self.hidden_size, **self.tc.default_config())(c)
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(c, 6, axis=-1)
-        
-        # Attention Residual.
-        x_norm = nn.LayerNorm(use_bias=False, use_scale=False, dtype=self.tc.dtype)(x)
-        x_modulated = modulate(x_norm, shift_msa, scale_msa)
-        channels_per_head = self.hidden_size // self.num_heads
-        k = nn.Dense(self.hidden_size, **self.tc.default_config())(x_modulated)
-        q = nn.Dense(self.hidden_size, **self.tc.default_config())(x_modulated)
-        v = nn.Dense(self.hidden_size, **self.tc.default_config())(x_modulated)
-        k = jnp.reshape(k, (k.shape[0], k.shape[1], self.num_heads, channels_per_head))
-        q = jnp.reshape(q, (q.shape[0], q.shape[1], self.num_heads, channels_per_head))
-        v = jnp.reshape(v, (v.shape[0], v.shape[1], self.num_heads, channels_per_head))
-        q = q / q.shape[3] # (1/d) scaling.
-        w = jnp.einsum('bqhc,bkhc->bhqk', q, k) # [B, HW, HW, num_heads]
-        w = w.astype(jnp.float32)
-        w = nn.softmax(w, axis=-1)
-        y = jnp.einsum('bhqk,bkhc->bqhc', w, v) # [B, HW, num_heads, channels_per_head]
-        y = jnp.reshape(y, x.shape) # [B, H, W, C] (C = heads * channels_per_head)
-        attn_x = nn.Dense(self.hidden_size, **self.tc.default_config())(y)
-        x = x + (gate_msa[:, None] * attn_x)
+        self.ada = nn.Linear(hidden, 6 * hidden)  # to produce shift/scale/gate for attn & mlp
 
-        # MLP Residual.
-        x_norm2 = nn.LayerNorm(use_bias=False, use_scale=False, dtype=self.tc.dtype)(x)
-        x_modulated2 = modulate(x_norm2, shift_mlp, scale_mlp)
-        mlp_x = MlpBlock(mlp_dim=int(self.hidden_size * self.mlp_ratio), tc=self.tc, 
-                         dropout_rate=self.dropout, train=self.train)(x_modulated2)
-        x = x + (gate_mlp[:, None] * mlp_x)
+    def forward(self, x, c):  # x:[B,L,C], c:[B,C]
+        # adaLN-Zero conditioning
+        c = F.silu(c)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.ada(c).chunk(6, dim=-1)
+
+        # Attention block
+        x_norm = self.norm1(x)
+        x_mod = modulate(x_norm, shift_msa, scale_msa)
+        B, L, C = x_mod.shape
+        H = self.heads
+        q = self.q(x_mod).view(B, L, H, C // H).transpose(1, 2)  # [B,H,L,D]
+        k = self.k(x_mod).view(B, L, H, C // H).transpose(1, 2)
+        v = self.v(x_mod).view(B, L, H, C // H).transpose(1, 2)
+        # Your JAX used q /= D; SDPA handles scaling internally; keep close to original:
+        q = q / (q.shape[-1])
+        attn = torch.softmax(torch.matmul(q, k.transpose(-2, -1)), dim=-1)  # [B,H,L,L]
+        y = torch.matmul(attn, v).transpose(1, 2).contiguous().view(B, L, C)
+        y = self.proj(y)
+        x = x + gate_msa[:, None, :] * y
+
+        # MLP block
+        x_norm2 = self.norm2(x)
+        x_mod2 = modulate(x_norm2, shift_mlp, scale_mlp)
+        x = x + gate_mlp[:, None, :] * self.mlp(x_mod2)
         return x
-    
-class FinalLayer(nn.Module):
-    """
-    The final layer of DiT.
-    """
-    patch_size: int
-    out_channels: int
-    hidden_size: int
-    tc: TrainConfig
 
-    @nn.compact
-    def __call__(self, x, c):
-        c = nn.silu(c)
-        c = nn.Dense(2 * self.hidden_size, kernel_init=self.tc.kern_init(zero=True), 
-                     bias_init=self.tc.kern_init('bias', zero=True), dtype=self.tc.dtype)(c)
-        shift, scale = jnp.split(c, 2, axis=-1)
-        x = nn.LayerNorm(use_bias=False, use_scale=False, dtype=self.tc.dtype)(x)
-        x = modulate(x, shift, scale)
-        x = nn.Dense(self.patch_size * self.patch_size * self.out_channels, 
-                     kernel_init=self.tc.kern_init('final', zero=True), 
-                     bias_init=self.tc.kern_init('final_bias', zero=True), dtype=self.tc.dtype)(x)
+class FinalLayer(nn.Module):
+    def __init__(self, patch_size: int, out_channels: int, hidden: int, tc: TrainConfig):
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.to_mod = nn.Linear(hidden, 2 * hidden)
+        self.proj = nn.Linear(hidden, patch_size * patch_size * out_channels)
+        self.patch = patch_size
+        self.outc = out_channels
+    def forward(self, x, c):
+        c = F.silu(c)
+        shift, scale = self.to_mod(c).chunk(2, dim=-1)
+        x = modulate(self.norm(x), shift, scale)
+        x = self.proj(x)  # [B, L, P*P*C]
         return x
 
 class DiT(nn.Module):
     """
-    Diffusion model with a Transformer backbone.
+    Torch port of your JAX DiT with adaLN-Zero and (t, dt, y) conditioning.
+    API mirrors: forward(x, t, dt, y, train=False, return_activations=False)
     """
-    patch_size: int
-    hidden_size: int
-    depth: int
-    num_heads: int
-    mlp_ratio: float
-    out_channels: int
-    class_dropout_prob: float
-    num_classes: int
-    ignore_dt: bool = False
-    dropout: float = 0.0
-    dtype: Dtype = jnp.bfloat16
+    def __init__(self,
+                 in_channels: int, patch_size: int, hidden_size: int, depth: int, num_heads: int,
+                 mlp_ratio: float, out_channels: int, class_dropout_prob: float,
+                 num_classes: int, ignore_dt: bool = False, dropout: float = 0.0,
+                 dtype: torch.dtype = torch.bfloat16, image_size: Optional[int] = None):
+        super().__init__()
+        self.in_channels = in_channels
+        self.patch = patch_size
+        self.hidden = hidden_size
+        self.depth = depth
+        self.heads = num_heads
+        self.mlp_ratio = mlp_ratio
+        self.outc = out_channels
+        self.class_dropout = class_dropout_prob
+        self.num_classes = num_classes
+        self.ignore_dt = ignore_dt
+        self.dropout = dropout
+        self.tc = TrainConfig(dtype=dtype)
 
-    @nn.compact
-    def __call__(self, x, t, dt, y, train=False, return_activations=False):
-        # (x = (B, H, W, C) image, t = (B,) timesteps, y = (B,) class labels)
-        print("DiT: Input of shape", x.shape, "dtype", x.dtype)
-        activations = {}
+        self.patch_embed = PatchEmbed(in_channels, patch_size, hidden_size, self.tc)
+        self.te = TimestepEmbedder(hidden_size, self.tc)
+        self.dte = TimestepEmbedder(hidden_size, self.tc)
+        self.ye = LabelEmbedder(num_classes, hidden_size, self.tc)
 
-        batch_size = x.shape[0]
-        input_size = x.shape[1]
-        in_channels = x.shape[-1]
-        num_patches = (input_size // self.patch_size) ** 2
-        num_patches_side = input_size // self.patch_size
-        tc = TrainConfig(dtype=self.dtype)
+        self.blocks = nn.ModuleList([
+            DiTBlock(hidden_size, num_heads, mlp_ratio, dropout, self.tc)
+            for _ in range(depth)
+        ])
+        self.final = FinalLayer(patch_size, out_channels, hidden_size, self.tc)
 
+        # logvars lookup by discrete t (0..255), multiplied by 100 like your JAX
+        self.logvar_table = nn.Embedding(256, 1)
+        nn.init.constant_(self.logvar_table.weight, 0.0)
+
+        self.image_size_hint = image_size  # optional; not strictly needed
+
+    @torch.no_grad()
+    def _get_pos_embed(self, num_patches, device):
+        return get_2d_sincos_pos_embed(self.hidden, num_patches, device=device).to(self.tc.dtype)
+
+    def forward(self, x_bhwc, t, dt, y, train: bool = False, return_activations: bool = False):
+        # x: [B,H,W,C] in [-?], t:[B] in [0,1], dt:[B] (ignored if self.ignore_dt), y:[B] (int)
+        B, H, W, C = x_bhwc.shape
         if self.ignore_dt:
-            dt = jnp.zeros_like(t)
-        
-        # pos_embed = self.param("pos_embed", get_2d_sincos_pos_embed, self.hidden_size, num_patches)
-        # pos_embed = jax.lax.stop_gradient(pos_embed)
-        pos_embed = get_2d_sincos_pos_embed(None, self.hidden_size, num_patches)
-        x = PatchEmbed(self.patch_size, self.hidden_size, tc=tc)(x) # (B, num_patches, hidden_size)
-        print("DiT: After patch embed, shape is", x.shape, "dtype", x.dtype)
-        activations['patch_embed'] = x
+            dt = torch.zeros_like(t)
 
-        x = x + pos_embed
-        x = x.astype(self.dtype)
-        te = TimestepEmbedder(self.hidden_size, tc=tc)(t) # (B, hidden_size)
-        dte = TimestepEmbedder(self.hidden_size, tc=tc)(dt) # (B, hidden_size)
-        ye = LabelEmbedder(self.num_classes, self.hidden_size, tc=tc)(y) # (B, hidden_size)
-        c = te + ye + dte
-        
-        activations['pos_embed'] = pos_embed
-        activations['time_embed'] = te
-        activations['dt_embed'] = dte
-        activations['label_embed'] = ye
-        activations['conditioning'] = c
+        x_tok, (Hp, Wp) = self.patch_embed(x_bhwc)      # [B, L, C]
+        L = Hp * Wp
+        pos = self._get_pos_embed(L, x_tok.device)
+        x = (x_tok + pos).to(self.tc.dtype)
 
-        print("DiT: Patch Embed of shape", x.shape, "dtype", x.dtype)
-        print("DiT: Conditioning of shape", c.shape, "dtype", c.dtype)
-        for i in range(self.depth):
-            x = DiTBlock(self.hidden_size, self.num_heads, tc, self.mlp_ratio, self.dropout, train)(x, c)
-            activations[f'dit_block_{i}'] = x
-        x = FinalLayer(self.patch_size, self.out_channels, self.hidden_size, tc)(x, c) # (B, num_patches, p*p*c)
-        activations['final_layer'] = x
-        # print("DiT: FinalLayer of shape", x.shape, "dtype", x.dtype)
-        x = jnp.reshape(x, (batch_size, num_patches_side, num_patches_side, 
-                            self.patch_size, self.patch_size, self.out_channels))
-        x = jnp.einsum('bhwpqc->bhpwqc', x)
-        x = rearrange(x, 'B H P W Q C -> B (H P) (W Q) C', H=int(num_patches_side), W=int(num_patches_side))
-        assert x.shape == (batch_size, input_size, input_size, self.out_channels)
+        te = self.te(t)
+        dte = self.dte(dt)
+        ye = self.ye(y)
+        c = te + dte + ye  # [B, hidden]
 
-        t_discrete = jnp.floor(t * 256).astype(jnp.int32)
-        logvars = nn.Embed(256, 1, embedding_init=nn.initializers.constant(0))(t_discrete) * 100
+        activ = {}
+        if return_activations:
+            activ['patch_embed'] = x
+            activ['pos_embed'] = pos
+            activ['time_embed'] = te
+            activ['dt_embed'] = dte
+            activ['label_embed'] = ye
+            activ['conditioning'] = c
+
+        for i, blk in enumerate(self.blocks):
+            x = blk(x, c)
+            if return_activations:
+                activ[f'dit_block_{i}'] = x
+
+        out = self.final(x, c)  # [B, L, P*P*C]
+        if return_activations:
+            activ['final_layer'] = out
+
+        # Fold tokens back to image
+        out = out.view(B, Hp, Wp, self.patch, self.patch, self.outc)       # [B, Hp, Wp, p, p, C]
+        out = out.permute(0, 1, 3, 2, 4, 5).contiguous()                    # [B, Hp, p, Wp, p, C]
+        out = out.view(B, Hp * self.patch, Wp * self.patch, self.outc)      # [B, H, W, C]
+
+        # discrete t for logvars (0..255)
+        t_disc = torch.clamp((t * 256).floor().to(torch.int64), 0, 255)
+        logvars = 100.0 * self.logvar_table(t_disc)  # [B,1]
 
         if return_activations:
-            return x, logvars, activations
-        return x
+            return out, logvars, activ
+        return out

@@ -1,161 +1,126 @@
-import jax
-import jax.experimental
-import wandb
-import jax.numpy as jnp
-import numpy as np
-import tqdm
-import matplotlib.pyplot as plt
+# helper_inference_torch.py
 import os
-from functools import partial
-from absl import app, flags
+import numpy as np
+import torch
+import tqdm
 
-flags.DEFINE_integer('inference_timesteps', 128, 'Number of timesteps for inference.')
-flags.DEFINE_integer('inference_generations', 4096, 'Number of generations for inference.')
-flags.DEFINE_float('inference_cfg_scale', 1.0, 'CFG scale for inference.')
-
+@torch.no_grad()
 def do_inference(
     FLAGS,
-    train_state,
-    step,
-    dataset,
-    dataset_valid,
-    shard_data,
-    vae_encode,
-    vae_decode,
-    update,
-    get_fid_activations,
-    imagenet_labels,
-    visualize_labels,
-    fid_from_stats,
-    truth_fid_stats,
+    model,                    # torch.nn.Module (maybe DDP-wrapped)
+    ema_model,                # torch.nn.Module or None
+    step,                     # int or None
+    dataset_iter,
+    dataset_valid_iter,
+    vae_encode=None,
+    vae_decode=None,
+    get_fid_activations=None,
+    imagenet_labels=None,
+    visualize_labels=None,
+    fid_from_stats=None,
+    truth_fid_stats=None,
 ):
-    with jax.spmd_mode('allow_all'):
-        global_device_count = jax.device_count()
-        key = jax.random.PRNGKey(42 + jax.process_index())
-        batch_images, batch_labels = next(dataset)
-        valid_images, valid_labels = next(dataset_valid)
-        if FLAGS.model.use_stable_vae:
-            batch_images = vae_encode(key, batch_images)
-            valid_images = vae_encode(key, valid_images)
-        batch_labels_sharded, valid_labels_sharded = shard_data(batch_labels, valid_labels)
-        labels_uncond = shard_data(jnp.ones(batch_labels.shape, dtype=jnp.int32) * FLAGS.model['num_classes']) # Null token
-        eps = jax.random.normal(key, batch_images.shape)
+    device = next(model.parameters()).device
+    model.eval()
+    if ema_model is not None:
+        ema_model.eval()
 
-        def process_img(img):
-            if FLAGS.model.use_stable_vae:
-                img = vae_decode(img[None])[0]
-            img = img * 0.5 + 0.5
-            img = jnp.clip(img, 0, 1)
-            img = np.array(img)
-            return img
-        
-        @partial(jax.jit, static_argnums=(5,))
-        def call_model(train_state, images, t, dt, labels, use_ema=True):
-            if use_ema and FLAGS.model.use_ema:
-                call_fn = train_state.call_model_ema
+    # Pull one batch for shape; JAX also takes shapes from current dataset. :contentReference[oaicite:10]{index=10}
+    batch_images, batch_labels = next(dataset_iter)
+    valid_images, valid_labels = next(dataset_valid_iter)
+    if FLAGS.model.use_stable_vae and vae_encode is not None:
+        batch_images = vae_encode(batch_images)
+        valid_images = vae_encode(valid_images)
+
+    images_shape = batch_images.shape
+    denoise_timesteps = getattr(FLAGS, "inference_timesteps", 128)
+    num_generations = getattr(FLAGS, "inference_generations", 4096)
+    cfg_scale = getattr(FLAGS, "inference_cfg_scale", 1.0)
+
+    print(f"Sampling cfg={cfg_scale} with T={denoise_timesteps} for {num_generations} images")  # :contentReference[oaicite:11]{index=11}
+
+    B = FLAGS.batch_size
+    delta_t = 1.0 / denoise_timesteps
+    all_x0, all_x1, all_labels = [], [], []
+
+    # Internal callable to run model (EMA if available) like your JAX call_model() wrapper. :contentReference[oaicite:12]{index=12}
+    def call_model(x, t_vector, dt_base, labels, use_ema=True):
+        m = ema_model if (use_ema and getattr(FLAGS.model, "use_ema", 0)) else model
+        # model forward expects BHWC and returns v_pred (BHWC)
+        v_pred, _, _ = m(x, t_vector, dt_base, labels, train=False, return_activations=True)
+        return v_pred
+
+    # Choose dt_base per JAX logic: smallest dt for naive; otherwise from inference T. :contentReference[oaicite:13]{index=13}
+    def make_dt_base(n):
+        if FLAGS.model.train_type == 'naive':
+            dt_flow = int(np.log2(FLAGS.model['denoise_timesteps']))
+        else:
+            dt_flow = int(np.log2(denoise_timesteps))
+        return torch.full((n,), dt_flow, device=device, dtype=torch.float32)
+
+    for fid_it in tqdm.tqdm(range(num_generations // B)):
+        # New noise + labels every chunk, like JAX: x ~ N(0,I), labels ~ Uniform classes. :contentReference[oaicite:14]{index=14}
+        x = torch.randn(images_shape, device=device)
+        labels = torch.randint(0, FLAGS.model['num_classes'], (images_shape[0],), device=device, dtype=torch.long)
+        all_x0.append(x.detach().cpu().numpy())
+
+        for ti in range(denoise_timesteps):
+            t = ti / denoise_timesteps
+            t_vector = torch.full((images_shape[0],), t, device=device, dtype=torch.float32)
+            dt_base = make_dt_base(images_shape[0])
+
+            if cfg_scale == 1:
+                v = call_model(x, t_vector, dt_base, labels, use_ema=True)
+            elif cfg_scale == 0:
+                labels_uncond = torch.full_like(labels, FLAGS.model['num_classes'])
+                v = call_model(x, t_vector, dt_base, labels_uncond, use_ema=True)
             else:
-                call_fn = train_state.call_model
-            output = call_fn(images, t, dt, labels, train=False)
-            return output
-        
-        if FLAGS.mode == 'interpolate':
-            seed = 5
-            eps0 = jax.random.normal(jax.random.PRNGKey(seed), batch_images[0].shape)
-            eps1 = jax.random.normal(jax.random.PRNGKey(seed+1), batch_images[0].shape)
-            labels = jnp.ones(FLAGS.batch_size,).astype(jnp.int32) * 555
-            i = jnp.linspace(0, 1, FLAGS.batch_size)
-            i_neg = np.sqrt(1-i**2)
-            x = eps0[None] * i_neg[:, None, None, None] + eps1[None] * i[:, None, None, None]
-            t_vector = jnp.full((FLAGS.batch_size, ), 0)
-            dt_vector = jnp.zeros_like(t_vector)
-            cfg_scale = FLAGS.inference_cfg_scale
-            v = call_model(train_state, x, t_vector, dt_vector, labels)
-            x = x + v * 1.0
-            x = vae_decode(x) # Image is in [-1, 1] space.
-            x_render = np.array(jax.experimental.multihost_utils.process_allgather(x))
-            os.makedirs(FLAGS.save_dir, exist_ok=True)
-            np.save(FLAGS.save_dir + f'/x_render.npy', x_render)
-            breakpoint()
+                labels_uncond = torch.full_like(labels, FLAGS.model['num_classes'])
+                v_uncond = call_model(x, t_vector, dt_base, labels_uncond, use_ema=True)
+                v_cond = call_model(x, t_vector, dt_base, labels, use_ema=True)
+                v = v_uncond + cfg_scale * (v_cond - v_uncond)  # CFG mix :contentReference[oaicite:15]{index=15}
 
-        denoise_timesteps = FLAGS.inference_timesteps
-        num_generations = FLAGS.inference_generations
-        cfg_scale = FLAGS.inference_cfg_scale
-        x0 = []
-        x1 = []
-        lab = []
-        x_render = []
-        activations = []
-        images_shape = batch_images.shape
-        print(f"Calc FID for CFG {cfg_scale} and denoise_timesteps {denoise_timesteps}")
-        for fid_it in tqdm.tqdm(range(num_generations // FLAGS.batch_size)):
-            key = jax.random.PRNGKey(42)
-            key = jax.random.fold_in(key, fid_it)
-            key = jax.random.fold_in(key, jax.process_index())
-            eps_key, label_key = jax.random.split(key)
-            x = jax.random.normal(eps_key, images_shape)
-            labels = jax.random.randint(label_key, (images_shape[0],), 0, FLAGS.model.num_classes)
-            x, labels = shard_data(x, labels)
-            x0.append(np.array(jax.experimental.multihost_utils.process_allgather(x)))
-            delta_t = 1.0 / denoise_timesteps
-            for ti in range(denoise_timesteps):
-                t = ti / denoise_timesteps # From x_0 (noise) to x_1 (data)
-                t_vector = jnp.full((images_shape[0], ), t)
-                if FLAGS.model.train_type == 'naive':
-                    dt_flow = np.log2(FLAGS.model['denoise_timesteps']).astype(jnp.int32)
-                    dt_base = jnp.ones(images_shape[0], dtype=jnp.int32) * dt_flow # Smallest dt.
-                else: # shortcut
-                    dt_flow = np.log2(denoise_timesteps).astype(jnp.int32)
-                    dt_base = jnp.ones(images_shape[0], dtype=jnp.int32) * dt_flow
-                    # print(dt_base)
-                t_vector, dt_base = shard_data(t_vector, dt_base)
-                if cfg_scale == 1:
-                    v = call_model(train_state, x, t_vector, dt_base, labels)
-                elif cfg_scale == 0:
-                    v = call_model(train_state, x, t_vector, dt_base, labels_uncond)
-                else:
-                    v_pred_uncond = call_model(train_state, x, t_vector, dt_base, labels_uncond)
-                    v_pred_label = call_model(train_state, x, t_vector, dt_base, labels)
-                    v = v_pred_uncond + cfg_scale * (v_pred_label - v_pred_uncond)
+            if FLAGS.model.train_type == 'consistency':
+                # Consistency step: x1pred = x + v*(1-t); then blend with fresh eps. :contentReference[oaicite:16]{index=16}
+                eps = torch.randn_like(x)
+                x1pred = x + v * (1.0 - t)
+                x = x1pred * (t + delta_t) + eps * (1.0 - t - delta_t)
+            else:
+                # Euler update
+                x = x + v * delta_t  # :contentReference[oaicite:17]{index=17}
 
-                if FLAGS.model.train_type == 'consistency':
-                    eps = shard_data(jax.random.normal(jax.random.fold_in(eps_key, ti), images_shape))
-                    x1pred = x + v * (1-t)
-                    x = x1pred * (t+delta_t) + eps * (1-t-delta_t)
-                else:
-                    x = x + v * delta_t # Euler sampling.
-            x1.append(np.array(jax.experimental.multihost_utils.process_allgather(x)))
-            lab.append(np.array(jax.experimental.multihost_utils.process_allgather(labels)))
-            if FLAGS.model.use_stable_vae:
-                x = vae_decode(x) # Image is in [-1, 1] space.
-                if num_generations < 10000:
-                    x_render.append(np.array(jax.experimental.multihost_utils.process_allgather(x)))
-            x = jax.image.resize(x, (x.shape[0], 299, 299, 3), method='bilinear', antialias=False)
-            x = jnp.clip(x, -1, 1)
-            acts = get_fid_activations(x)[..., 0, 0, :] # [devices, batch//devices, 2048]
-            acts = jax.experimental.multihost_utils.process_allgather(acts)
-            acts = np.array(acts)
-            activations.append(acts)
-        
-        if jax.process_index() == 0:
-            activations = np.concatenate(activations, axis=0)
-            activations = activations.reshape((-1, activations.shape[-1]))
-            mu1 = np.mean(activations, axis=0)
-            sigma1 = np.cov(activations, rowvar=False)
-            fid = fid_from_stats(mu1, sigma1, truth_fid_stats['mu'], truth_fid_stats['sigma'])
-            print(f"FID is {fid}")
-            print(f"FID is {fid}")
-            print(f"FID is {fid}")
+        all_x1.append(x.detach().cpu().numpy())
+        all_labels.append(labels.detach().cpu().numpy())
 
+        # optional on-the-fly rendering for small N: decode and stash
+        # (Your JAX version conditionally saved render arrays) :contentReference[oaicite:18]{index=18}
 
-            if FLAGS.save_dir is not None:
-                os.makedirs(FLAGS.save_dir, exist_ok=True)
-                x_render = np.concatenate(x_render, axis=0)
-                np.save(FLAGS.save_dir + f'/x_render.npy', x_render)
+    # Optionally decode to image space
+    # NOTE: generation x is in latent/image space depending on training; if VAE used, decode to [-1,1]
+    if FLAGS.model.use_stable_vae and vae_decode is not None:
+        # Decode last chunk just to verify pipeline
+        x_vis = vae_decode(torch.tensor(all_x1[-1], device=device))
+        x_vis = (x_vis * 0.5 + 0.5).clamp(0, 1)
 
-                # x0 = np.concatenate(x0, axis=0)
-                # x1 = np.concatenate(x1, axis=0)
-                # lab = np.concatenate(lab, axis=0)
-                # os.makedirs(FLAGS.save_dir, exist_ok=True)
-                # np.save(FLAGS.save_dir + f'/x0.npy', x0)
-                # np.save(FLAGS.save_dir + f'/x1.npy', x1)
-                # np.save(FLAGS.save_dir + f'/lab.npy', lab)
+    # Optional FID computation against provided stats (approximate, subset)
+    if get_fid_activations and truth_fid_stats is not None:
+        # Collect a reasonable subset to keep memory sane
+        subset = min(8192, len(all_x1) * B)
+        xs = torch.tensor(np.concatenate(all_x1, axis=0)[:subset], device=device)
+        if FLAGS.model.use_stable_vae and vae_decode is not None:
+            xs = vae_decode(xs)
+        xs = (xs * 0.5 + 0.5).clamp(0, 1)
+        acts = []
+        for i in range(0, xs.shape[0], 64):
+            acts.append(get_fid_activations(xs[i:i+64]).cpu())
+        acts = torch.cat(acts, dim=0).numpy()
+        mu, sigma = acts.mean(0), np.cov(acts, rowvar=False)
+        fid = fid_from_stats(mu, sigma, truth_fid_stats['mu'], truth_fid_stats['sigma'])
+        print(f"[inference] FID (subset): {fid:.2f}")
+
+    # Optionally save raw arrays for later analysis
+    if getattr(FLAGS, "save_dir", None):
+        os.makedirs(FLAGS.save_dir, exist_ok=True)
+        np.save(os.path.join(FLAGS.save_dir, "x0.npy"), np.concatenate(all_x0, axis=0))
+        np.save(os.path.join(FLAGS.save_dir, "x1.npy"), np.concatenate(all_x1, axis=0))
+        np.save(os.path.join(FLAGS.save_dir, "labels.npy"), np.concatenate(all_labels, axis=0))
