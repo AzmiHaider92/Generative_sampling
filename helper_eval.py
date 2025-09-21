@@ -7,8 +7,7 @@ import matplotlib.pyplot as plt
 
 @torch.no_grad()
 def eval_model(
-    FLAGS,
-    save_dir,
+    cfg,
     model,                   # torch.nn.Module (possibly DDP-wrapped)
     ema_model,               # torch.nn.Module or None
     step: int,
@@ -33,14 +32,14 @@ def eval_model(
     valid_images, valid_labels = next(dataset_valid_iter)
 
     # VAE encode to latents if needed (your JAX path does this before eval) :contentReference[oaicite:2]{index=2}
-    if FLAGS.model['use_stable_vae'] and 'latent' not in FLAGS.dataset_name:
+    if cfg.model_cfg.use_stable_vae and 'latent' not in cfg.runtime_cfg.dataset_name:
         if vae_encode is None:
             raise RuntimeError("vae_encode required when use_stable_vae=1")
         batch_images = vae_encode(batch_images)
         valid_images = vae_encode(valid_images)
 
     # If dataset already provides latent pairs, split them like JAX (eps|img) :contentReference[oaicite:3]{index=3}
-    if 'latent' in FLAGS.dataset_name:
+    if 'latent' in cfg.runtime_cfg.dataset_name:
         # Follow your file’s intent; the original had slicing typos in snippet,
         # but the idea is (eps | x) along channel-last axis.
         half = valid_images.shape[-1] // 2
@@ -51,13 +50,13 @@ def eval_model(
     # Helper to render BHWC in [0,1], optionally via VAE decode :contentReference[oaicite:4]{index=4}
     def process_img(img_bhwc):
         x = img_bhwc
-        if FLAGS.model['use_stable_vae'] and vae_decode is not None:
+        if cfg.model_cfg.use_stable_vae and vae_decode is not None:
             x = vae_decode(x)  # decode latents to image space [-1,1]
         x = (x * 0.5 + 0.5).clamp(0, 1)
         return x
 
     # ---- Per-t loss sweep like your JAX plots (discrete dt buckets) ---- :contentReference[oaicite:5]{index=5}
-    if FLAGS.model['denoise_timesteps'] == 128:
+    if cfg.model_cfg.denoise_timesteps == 128:
         rows, cols = 5, 8
         d_list = [0, 1, 2, 3, 4, 5, 6, 7]
     else:
@@ -75,7 +74,7 @@ def eval_model(
                 bi, bl = next(dataset_iter)
             except StopIteration:
                 break
-            if FLAGS.model['use_stable_vae'] and 'latent' not in FLAGS.dataset_name and vae_encode is not None:
+            if cfg.model_cfg.use_stable_vae and 'latent' not in cfg.runtime_cfg.dataset_name and vae_encode is not None:
                 bi = vae_encode(bi)
             # call your Torch update_fn in eval mode with force_t
             if update_fn is None:
@@ -101,8 +100,8 @@ def eval_model(
         ax.set_ylabel("loss")
 
     plt.tight_layout()
-    if getattr(FLAGS, "save_dir", None):
-        fig.savefig(f"{save_dir}/eval_loss_by_t.png", dpi=160)
+    if cfg.runtime_cfg.save_dir:
+        fig.savefig(f"{cfg.runtime_cfg.save_dir}/eval_loss_by_t.png", dpi=160)
     plt.close(fig)
 
     # (Optional) quick FID check for one small batch of decoded samples

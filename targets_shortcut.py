@@ -46,23 +46,23 @@ def _build_dt_base(bootstrap_size: int, log2_sections: int, device, bias: int):
 
 
 @torch.no_grad()
-def get_targets(FLAGS, gen, call_model, images, labels, force_t=-1, force_dt=-1):
+def get_targets(cfg, gen, call_model, images, labels, force_t=-1, force_dt=-1):
     device = images.device
     info = {}
     B = images.shape[0]
 
     # Use the *actual* per-step batch size here
-    bootstrap_every = int(FLAGS.model['bootstrap_every'])
+    bootstrap_every = int(cfg.model_cfg.bootstrap_every)
     bootstrap_size = max(0, B // max(1, bootstrap_every))  # e.g., B=8, every=4 -> 2
     bootstrap_size = min(bootstrap_size, B)  # never exceed B
 
-    log2_sections = int(math.log2(int(FLAGS.model['denoise_timesteps'])))
+    log2_sections = int(math.log2(int(cfg.model_cfg.denoise_timesteps)))
 
     dt_base = _build_dt_base(
         bootstrap_size=bootstrap_size,
         log2_sections=log2_sections,
         device=device,
-        bias=int(FLAGS.model['bootstrap_dt_bias'])
+        bias=int(cfg.model_cfg.bootstrap_dt_bias)
     )
 
     if force_dt != -1:
@@ -97,31 +97,31 @@ def get_targets(FLAGS, gen, call_model, images, labels, force_t=-1, force_dt=-1)
     x_t = (1.0 - (1.0 - 1e-5) * t_full) * x0 + t_full * x1
     b_labels = labels[:bootstrap_size]
 
-    if not FLAGS.model['bootstrap_cfg']:
-        v_b1 = call_model(x_t, t, dt_base_bootstrap, b_labels, use_ema=bool(FLAGS.model['bootstrap_ema']))
+    if not cfg.model_cfg.bootstrap_cfg:
+        v_b1 = call_model(x_t, t, dt_base_bootstrap, b_labels, use_ema=bool(cfg.model_cfg.bootstrap_ema))
         t2 = t + dt_bootstrap
         x_t2 = torch.clamp(x_t + dt_bootstrap.view(-1,1,1,1) * v_b1, -4, 4)
-        v_b2 = call_model(x_t2, t2, dt_base_bootstrap, b_labels, use_ema=bool(FLAGS.model['bootstrap_ema']))
+        v_b2 = call_model(x_t2, t2, dt_base_bootstrap, b_labels, use_ema=bool(cfg.model_cfg.bootstrap_ema))
         v_target = 0.5 * (v_b1 + v_b2)
     else:
         num_dt_cfg = max(1, bootstrap_size // log2_sections)
         x_t_ext = torch.cat([x_t, x_t[:num_dt_cfg]], 0)
         t_ext = torch.cat([t, t[:num_dt_cfg]], 0)
         dt_ext = torch.cat([dt_base_bootstrap, dt_base_bootstrap[:num_dt_cfg]], 0)
-        labels_ext = torch.cat([b_labels, torch.full((num_dt_cfg,), FLAGS.model['num_classes'], device=device, dtype=torch.long)], 0)
+        labels_ext = torch.cat([b_labels, torch.full((num_dt_cfg,), cfg.runtime_cfg.num_classes, device=device, dtype=torch.long)], 0)
 
-        v_raw = call_model(x_t_ext, t_ext, dt_ext, labels_ext, use_ema=bool(FLAGS.model['bootstrap_ema']))
+        v_raw = call_model(x_t_ext, t_ext, dt_ext, labels_ext, use_ema=bool(cfg.model_cfg.bootstrap_ema))
         v_cond, v_uncond = v_raw[:bootstrap_size], v_raw[bootstrap_size:]
-        v_cfg = v_uncond + FLAGS.model['cfg_scale'] * (v_cond[:num_dt_cfg] - v_uncond)
+        v_cfg = v_uncond + cfg.model_cfg.cfg_scale * (v_cond[:num_dt_cfg] - v_uncond)
         v_b1 = torch.cat([v_cfg, v_cond[num_dt_cfg:]], 0)
 
         t2 = t + dt_bootstrap
         x_t2 = torch.clamp(x_t + dt_bootstrap.view(-1,1,1,1) * v_b1, -4, 4)
         x_t2_ext = torch.cat([x_t2, x_t2[:num_dt_cfg]], 0)
         t2_ext = torch.cat([t2, t2[:num_dt_cfg]], 0)
-        v2_raw = call_model(x_t2_ext, t2_ext, dt_ext, labels_ext, use_ema=bool(FLAGS.model['bootstrap_ema']))
+        v2_raw = call_model(x_t2_ext, t2_ext, dt_ext, labels_ext, use_ema=bool(cfg.model_cfg.bootstrap_ema))
         v2_cond, v2_uncond = v2_raw[:bootstrap_size], v2_raw[bootstrap_size:]
-        v2_cfg = v2_uncond + FLAGS.model['cfg_scale'] * (v2_cond[:num_dt_cfg] - v2_uncond)
+        v2_cfg = v2_uncond + cfg.model_cfg.cfg_scale * (v2_cond[:num_dt_cfg] - v2_uncond)
         v_b2 = torch.cat([v2_cfg, v2_cond[num_dt_cfg:]], 0)
         v_target = 0.5 * (v_b1 + v_b2)
 
@@ -129,9 +129,9 @@ def get_targets(FLAGS, gen, call_model, images, labels, force_t=-1, force_dt=-1)
     bst_v, bst_dt, bst_t, bst_xt, bst_l = v_target, dt_base, t, x_t, b_labels
 
     # flow targets for the rest
-    rest = FLAGS.batch_size - bootstrap_size
-    t_flow = torch.randint(0, FLAGS.model['denoise_timesteps'], (rest,), generator=gen, device=device).float()
-    t_flow = t_flow / float(FLAGS.model['denoise_timesteps'])
+    rest = cfg.runtime_cfg.batch_size - bootstrap_size
+    t_flow = torch.randint(0, cfg.model_cfg.denoise_timesteps, (rest,), generator=gen, device=device).float()
+    t_flow = t_flow / float(cfg.model_cfg.denoise_timesteps)
     if force_t != -1:
         t_flow = torch.full_like(t_flow, float(force_t))
     t_flow_full = t_flow.view(rest,1,1,1)
@@ -143,7 +143,7 @@ def get_targets(FLAGS, gen, call_model, images, labels, force_t=-1, force_dt=-1)
     x1_flow = images[:rest]
     x_t_flow = (1.0 - (1.0 - 1e-5) * t_flow_full) * x0_flow + t_flow_full * x1_flow
     v_t_flow = x1_flow - (1.0 - 1e-5) * x0_flow
-    dt_flow = int(math.log2(FLAGS.model['denoise_timesteps']))
+    dt_flow = int(math.log2(cfg.model_cfg.denoise_timesteps))
     dt_base_flow = torch.full((rest,), dt_flow, device=device, dtype=torch.float32)
 
     x_t_out = torch.cat([bst_xt, x_t_flow], 0)

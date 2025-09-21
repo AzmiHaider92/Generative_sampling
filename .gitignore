@@ -1,5 +1,6 @@
 *.sqsh
 data/
+configs/
 wandb/
 environment.yml
 utils/__pycache__
