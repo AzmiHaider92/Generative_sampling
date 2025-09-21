@@ -261,7 +261,7 @@ def main():
 
     if is_ddp:
         dit = torch.nn.parallel.DistributedDataParallel(
-            dit, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
+            dit, device_ids=[device.index], output_device=device.index, find_unused_parameters=True
         )
 
     live_model = dit.module if is_ddp else dit
@@ -428,6 +428,12 @@ def main():
         else:  # BF16 / full-precision path
             loss.backward()
             opt.step()
+        
+        # debug (unused layers/params)
+        #if int(os.environ.get("RANK", "0")) == 0:
+        #    unused = [n for n,p in dit.named_parameters() if p.requires_grad and p.grad is None]
+        #    if unused:
+        #        print("UNUSED PARAMS:", unused[:20], "… count:", len(unused))
 
         # EMA update
         if model_cfg.use_ema and ema_model is not None:

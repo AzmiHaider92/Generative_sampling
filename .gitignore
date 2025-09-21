@@ -1,3 +1,4 @@
+*.sqsh
 data/
 wandb/
 environment.yml
