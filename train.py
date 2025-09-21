@@ -91,6 +91,7 @@ def main():
         base_name = wandb_cfg.name.format(model_name=model_cfg.train_type, dataset_name=runtime_cfg.dataset_name)
         run_name = f"{base_name}_{ts}"
         runtime_cfg.save_dir = os.path.join(runtime_cfg.save_dir, run_name)
+        os.makedirs(runtime_cfg.save_dir, exist_ok=True)
 
         wandb.init(
             project=wandb_cfg.project,

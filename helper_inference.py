@@ -120,7 +120,6 @@ def do_inference(
 
     # Optionally save raw arrays for later analysis
     if cfg.runtime_cfg.save_dir is not None:
-        os.makedirs(cfg.runtime_cfg.save_dir, exist_ok=True)
         np.save(os.path.join(cfg.runtime_cfg.save_dir, "x0.npy"), np.concatenate(all_x0, axis=0))
         np.save(os.path.join(cfg.runtime_cfg.save_dir, "x1.npy"), np.concatenate(all_x1, axis=0))
         np.save(os.path.join(cfg.runtime_cfg.save_dir, "labels.npy"), np.concatenate(all_labels, axis=0))
