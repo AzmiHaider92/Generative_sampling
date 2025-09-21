@@ -1,4 +1,5 @@
 *.sqsh
+log/
 data/
 configs/
 wandb/

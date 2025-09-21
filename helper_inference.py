@@ -28,7 +28,7 @@ def do_inference(
     # Pull one batch for shape; JAX also takes shapes from current dataset. :contentReference[oaicite:10]{index=10}
     batch_images, batch_labels = next(dataset_iter)
     valid_images, valid_labels = next(dataset_valid_iter)
-    if cfg.model.use_stable_vae and vae_encode is not None:
+    if cfg.model_cfg.use_stable_vae and vae_encode is not None:
         batch_images = vae_encode(batch_images)
         valid_images = vae_encode(valid_images)
 
@@ -80,7 +80,7 @@ def do_inference(
                 v_cond = call_model(x, t_vector, dt_base, labels, use_ema=True)
                 v = v_uncond + cfg_scale * (v_cond - v_uncond)  # CFG mix :contentReference[oaicite:15]{index=15}
 
-            if cfg.model_cfg.num_classes.train_type == 'consistency':
+            if cfg.model_cfg.train_type == 'consistency':
                 # Consistency step: x1pred = x + v*(1-t); then blend with fresh eps. :contentReference[oaicite:16]{index=16}
                 eps = torch.randn_like(x)
                 x1pred = x + v * (1.0 - t)
