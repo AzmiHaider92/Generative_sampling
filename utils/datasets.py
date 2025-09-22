@@ -21,8 +21,8 @@ def _to_minus1_1():
 
 def _build_transform(image_size=256, train=False):
     ops = [
-        CenterSquare(),
-        transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC),
+        #CenterSquare(),
+        #transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),     # [0,1], CHW
         _to_minus1_1(),            # [-1,1], CHW
     ]
@@ -121,37 +121,42 @@ def _make_imagefolder_loader(root: str, split: str, batch_size: int,
         batch_size=batch_size,
         shuffle=(sampler is None) and is_train,
         sampler=sampler,
-        num_workers=_auto_workers(),
+        num_workers=2, # _auto_workers(),
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=2,
         drop_last=True,
         worker_init_fn=_seed_worker,
-        pin_memory_device="cuda" if torch.cuda.is_available() else ""
+        #pin_memory_device="cuda" if torch.cuda.is_available() else ""
     )
     return loader
 
-def _get_tiny_imagenet_iter(batch_size: int, train: bool, debug_overfit: int) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
+def _get_tiny_imagenet_iter(per_rank_bs: int, train: bool, debug_overfit: int):
     world = int(os.environ.get("WORLD_SIZE", "1"))
-    rank = int(os.environ.get("RANK", "0"))
-    per_rank_bs = max(1, batch_size // world)
+    rank  = int(os.environ.get("RANK", "0"))
+
+    print(f"[rank {rank}] per_rank_bs={per_rank_bs}  global_bs={per_rank_bs * world}")
 
     root_dir = os.environ.get("TINY_IMAGENET_ROOT", "./data")
+    # ideally do this only on rank 0 and barrier; shown earlier
     base = _prepare_tiny_imagenet(root_dir)
+
     split = "train" if train else "val"
-    # NOTE: Tiny-ImageNet has 'test' without labels; we don't use it.
     split_dir = os.path.join(base, split)
-    loader = _make_imagefolder_loader(split_dir, split, per_rank_bs, world, rank,
-                                      image_size=64, debug_overfit=debug_overfit)
+
+    loader = _make_imagefolder_loader(
+        split_dir, split, per_rank_bs, world, rank,
+        image_size=64, debug_overfit=debug_overfit
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def _iter():
         if isinstance(loader.sampler, DistributedSampler):
             loader.sampler.set_epoch(torch.randint(0, 2**31-1, (1,)).item())
         for x_chw, y in loader:
-            x_chw = x_chw.to(device, non_blocking=True)    # [B,C,H,W] in [-1,1]
+            x_chw = x_chw.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True).long()
-            yield x_chw.permute(0, 2, 3, 1).contiguous(), y  # -> BHWC
+            yield x_chw.permute(0, 2, 3, 1).contiguous(), y  # BHWC
     return _iter()
 
 def _get_cifar100_iter(batch_size: int, train: bool, debug_overfit: int) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:

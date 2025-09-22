@@ -15,7 +15,7 @@ from tqdm import tqdm
 from arguments_parser import RuntimeCfg, ModelCfg, WandbCfg, load_configs_from_file, parse_args, CFG
 from model import DiT
 import importlib
-
+import time
 from utils.datasets import get_dataset as get_dataset_iter
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from utils.sharding import ddp_setup
@@ -58,10 +58,21 @@ class LinearWarmup:
         return self.base_lr
 
 
+def print_gpu_info(rank=0, world_size=1, local_rank=0):
+    if rank == 0:  # only rank 0 prints
+        print("===================================")
+        print(f"🌍 WORLD_SIZE = {world_size}")
+        print(f"🖥️  Visible GPUs = {torch.cuda.device_count()}")
+    print(f"[Rank {rank}/{world_size}] -> using cuda:{local_rank}")
+    print("===================================")
+
+
 # ---------------- Train ----------------
 def main():
-    is_ddp, rank, world = ddp_setup()
-    device = torch.device(f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}" if torch.cuda.is_available() else "cpu")
+    is_ddp, device, rank, world, local_rank = ddp_setup()
+    print_gpu_info(rank, world, local_rank)
+
+    #device = torch.device(f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}" if torch.cuda.is_available() else "cpu")
 
     args = parse_args()
 
@@ -157,7 +168,7 @@ def main():
 
     if is_ddp:
         dit = torch.nn.parallel.DistributedDataParallel(
-            dit, device_ids=[device.index], output_device=device.index, find_unused_parameters=True
+            dit, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
         )
 
     live_model = dit.module if is_ddp else dit
@@ -280,15 +291,35 @@ def main():
     # one pass to know channels
     example_images = maybe_encode(example_images)
 
-    pbar = tqdm(range(global_step + 1, runtime_cfg.max_steps + 1),
-                disable=is_ddp and rank != 0, dynamic_ncols=True)
-    for i in pbar:
+
+    ################################################################################################################
+    #  _             _
+    # | |_ _ __ __ _(_)_ __
+    # | __| '__/ _` | | '_ \
+    # | |_| | | (_| | | | | |
+    #  \__|_|  \__,_|_|_| |_|
+    #
+    ################################################################################################################
+    
+    print("==========================================================================")
+    print("====================== start training loop ===============================")
+    print("==========================================================================")
+    
+    #pbar = tqdm(range(global_step + 1, runtime_cfg.max_steps + 1),
+    #            disable=is_ddp and rank != 0, dynamic_ncols=True)
+
+    accum_steps = 1  # set >1 if you use gradient accumulation
+    pbar = tqdm(total=runtime_cfg.max_steps + 1, dynamic_ncols=True)
+    ema_t = None
+
+    for i, (batch_images, batch_labels) in enumerate(train_iter):
+        t0 = time.time()
         # fetch batch
-        try:
-            batch_images, batch_labels = next(train_iter)
-        except StopIteration:
-            train_iter = get_dataset_iter(runtime_cfg.dataset_name, per_rank_bs, True, runtime_cfg.debug_overfit)
-            batch_images, batch_labels = next(train_iter)
+        #try:
+        #    batch_images, batch_labels = next(train_iter)
+        #except StopIteration:
+        #    train_iter = get_dataset_iter(runtime_cfg.dataset_name, per_rank_bs, True, runtime_cfg.debug_overfit)
+        #    batch_images, batch_labels = next(train_iter)
 
         batch_images = maybe_encode(batch_images)
 
@@ -409,6 +440,14 @@ def main():
                 ckpt_path = os.path.join(runtime_cfg.save_dir, f"model_step_{i}.pt")
                 save_checkpoint(ckpt_path, dit.module if is_ddp else dit, opt, step=i, ema=ema_model)
                 print(f"[save] {ckpt_path}")
+
+        # update bar
+        step_time = time.time() - t0
+        ema_t = step_time if ema_t is None else 0.9*ema_t + 0.1*step_time
+        imgs_per_sec = (runtime_cfg.batch_size * accum_steps) / ema_t
+        if rank == 0:
+            pbar.set_postfix_str(f"GBS={runtime_cfg.batch_size} img/s={imgs_per_sec:.0f} step={ema_t*1e3:.0f}ms")
+            pbar.update(1)
 
     if is_ddp:
         dist.barrier()

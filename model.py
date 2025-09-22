@@ -204,8 +204,8 @@ class DiT(nn.Module):
         self.final = FinalLayer(patch_size, out_channels, hidden_size, self.tc)
 
         # logvars lookup by discrete t (0..255), multiplied by 100 like your JAX
-        self.logvar_table = nn.Embedding(256, 1)
-        nn.init.constant_(self.logvar_table.weight, 0.0)
+        #self.logvar_table = nn.Embedding(256, 1)
+        #nn.init.constant_(self.logvar_table.weight, 0.0)
 
         self.image_size_hint = image_size  # optional; not strictly needed
 
@@ -253,8 +253,8 @@ class DiT(nn.Module):
         out = out.view(B, Hp * self.patch, Wp * self.patch, self.outc)      # [B, H, W, C]
 
         # discrete t for logvars (0..255)
-        t_disc = torch.clamp((t * 256).floor().to(torch.int64), 0, 255)
-        logvars = 100.0 * self.logvar_table(t_disc)  # [B,1]
+        #t_disc = torch.clamp((t * 256).floor().to(torch.int64), 0, 255)
+        logvars = 0 #100.0 * self.logvar_table(t_disc)  # [B,1]
 
         if return_activations:
             return out, logvars, activ
