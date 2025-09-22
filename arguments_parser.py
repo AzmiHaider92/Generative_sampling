@@ -7,6 +7,7 @@ from dataclasses import replace
 @dataclass
 class RuntimeCfg:
     dataset_name: str = "tiny-imagenet-256"
+    dataset_root_dir: str = "./data"
     num_classes: int = 1  #
     load_dir: Optional[str] = None
     save_dir: Optional[str] = None

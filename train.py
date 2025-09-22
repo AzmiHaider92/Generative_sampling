@@ -90,8 +90,8 @@ def main():
     # ----- data -----
     # Iterator that yields (images_bhwc, labels)
     per_rank_bs = max(1, runtime_cfg.batch_size // max(1, world))
-    train_iter = get_dataset_iter(runtime_cfg.dataset_name, per_rank_bs, True, runtime_cfg.debug_overfit)
-    valid_iter = get_dataset_iter(runtime_cfg.dataset_name, per_rank_bs, False, runtime_cfg.debug_overfit)
+    train_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True, runtime_cfg.debug_overfit)
+    valid_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit)
     example_images, example_labels = next(train_iter)
     H = example_images.shape[1]; W = example_images.shape[2]; C = example_images.shape[3]
 
