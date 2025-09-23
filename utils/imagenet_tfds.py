@@ -52,9 +52,6 @@ def _seed_worker(worker_id):
     except Exception:
         pass
 
-
-
-
 def _identity(x):  # top-level = picklable
     return x
 
@@ -66,20 +63,26 @@ def _find_shards(root: str, split: str):
         if f.startswith(pat) and not f.endswith(".index") and os.path.isfile(os.path.join(root, f))
     )
 
-def _ensure_index(p: str) -> str:
-    if p.endswith(".index"): return p
-    idx = p + ".index"
-    if not os.path.isfile(idx):
-        _create_index(p, idx)  # do this on rank 0 only in multi-GPU
-    return idx
 
-def _ensure_all_indexes(shards, world=1, rank=0):
+def _ensure_index(tfr_path: str, index_root: str) -> str:
+    os.makedirs(index_root, exist_ok=True)
+    idx_path = os.path.join(index_root, os.path.basename(tfr_path) + ".index")
+    if not os.path.isfile(idx_path):
+        _create_index(tfr_path, idx_path)   # do on rank 0 only in multi-GPU
+    return idx_path
+
+
+def _ensure_all_indexes(shards, index_root: str, world=1, rank=0):
+    os.makedirs(index_root, exist_ok=True)
     if world > 1 and dist.is_available() and dist.is_initialized():
         if rank == 0:
-            for p in shards: _ensure_index(p)
+            for p in shards:
+                _ensure_index(p, index_root)
         dist.barrier()
-        return [p + ".index" for p in shards]
-    return [_ensure_index(p) for p in shards]
+        # everyone returns the same index paths under index_root
+        return [os.path.join(index_root, os.path.basename(p) + ".index") for p in shards]
+    else:
+        return [_ensure_index(p, index_root) for p in shards]
 
 
 # optional: useful for __len__
@@ -102,14 +105,15 @@ class ImageNetTFRecord(IterableDataset):
     def __init__(self, root: str, split: str, world: int, rank: int, image_size: int = 256):
         self.world, self.rank = max(1, world), rank
         self.shards  = _find_shards(root, split)
-        self.indexes = _ensure_all_indexes(self.shards, self.world, self.rank)
+        index_root = r'./data/imagenet_index_dir'
+        self.indexes = _ensure_all_indexes(self.shards, index_root, self.world, self.rank)
         # use your schema
         self.img_key, self.label_key = _IMG_KEY, _LABEL_KEY
         self.desc    = _build_desc(self.img_key, self.label_key)
         self.tfm     = _build_transform(image_size)
         # optional length estimate if you want
-        self._size_rank = sum(_index_count(p + ".index") if not p.endswith(".index") else _index_count(p)
-                              for p in self.shards[self.rank::self.world])
+        self._size_rank = sum(_index_count(idx) for idx in self.indexes[self.rank::self.world])
+
 
     def __len__(self):  # optional; okay for IterableDataset
         return self._size_rank
@@ -143,7 +147,7 @@ class ImageNetTFRecord(IterableDataset):
 
 
 def get_imagenet_tfrecord_iter(root, per_rank_bs, train, world, rank, image_size=256, debug_overfit=0):
-    ds = ImageNetTFRecord(root, "train" if train else "val", world, rank, image_size=image_size)
+    ds = ImageNetTFRecord(root, "train" if train else "validation", world, rank, image_size=image_size)
 
     # Windows uses spawn ⇒ start with num_workers=0; on Linux you can bump it
     num_workers = 0 if os.name == "nt" else _auto_workers(world)

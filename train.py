@@ -341,7 +341,7 @@ def main():
 
         # unconditional path if cfg_scale == 0 (match JAX)
         if model_cfg.cfg_scale == 0:
-            labels_eff = torch.full_like(labels_eff, model_cfg.num_classes)
+            labels_eff = torch.full_like(labels_eff, runtime_cfg.num_classes)
 
         # forward + loss
         opt.zero_grad(set_to_none=True)
