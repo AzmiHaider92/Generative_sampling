@@ -332,7 +332,7 @@ def main():
     ema_t = None
     EMA_EVERY = 10
     EMA_DECAY = 0.9999
-    step, max_steps = 0, runtime_cfg.max_steps  # e.g., 8001
+    step, max_steps = 1, runtime_cfg.max_steps + 1  # e.g., 8001
 
     while step < max_steps:
         t0 = time.time()
@@ -353,7 +353,7 @@ def main():
         elif model_cfg.train_type == 'shortcut':
             x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
         elif model_cfg.train_type == 'progressive':
-            x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, batch_images, batch_labels, step=i)
+            x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, batch_images, batch_labels, step=step)
         elif model_cfg.train_type == 'consistency-distillation':
             x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, call_model_student_ema, batch_images, batch_labels)
         elif model_cfg.train_type == 'consistency':
@@ -383,15 +383,15 @@ def main():
             opt.step()
 
         # EMA update
-        if model_cfg.use_ema and ema_model is not None and (i % EMA_EVERY == 0):
+        if model_cfg.use_ema and ema_model is not None and (step % EMA_EVERY == 0):
             ema_model.update(dit.module if is_ddp else dit, decay=EMA_DECAY ** EMA_EVERY)
 
         # log (every log_interval)
-        if ((i % runtime_cfg.log_interval) == 0):
+        if ((step % runtime_cfg.log_interval) == 0):
             # cheap scalars on every rank, averaged like JAX
             train_loss_mean = ddp_mean_scalar(float(loss.detach().cpu()), device)
             vmag_mean = ddp_mean_scalar(float(v_pred.square().mean().sqrt().detach().cpu()), device)
-            lr_mean = ddp_mean_scalar(float(lr_sched(i)), device)
+            lr_mean = ddp_mean_scalar(float(lr_sched(step)), device)
 
             # quick, single-rank validation (no activations)
             if (not is_ddp) or rank == 0:
@@ -411,7 +411,7 @@ def main():
                         v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model, vimg, vlbl)
                     elif model_cfg.train_type == "progressive":
                         v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_teacher, vimg, vlbl,
-                                                                            step=i)
+                                                                            step=step)
                     else:  # "consistency" / "consistency-distillation"
                         v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_student_ema, vimg,
                                                                             vlbl)
@@ -424,23 +424,23 @@ def main():
                     "training/v_magnitude_prime": vmag_mean,
                     "training/lr": lr_mean,
                     "training/loss_valid": v_loss,
-                }, step=i)
+                }, step=step)
 
         # stepwise LR (optional)
-        for g in opt.param_groups: g['lr'] = lr_sched(i)
+        for g in opt.param_groups: g['lr'] = lr_sched(step)
 
         # progressive: refresh teacher
         if model_cfg.train_type == 'progressive':
             num_sections = int(math.log2(model_cfg.denoise_timesteps))
-            if i % max(1, (runtime_cfg.max_steps // max(1, num_sections))) == 0 and teacher_model is not None:
+            if step % max(1, (runtime_cfg.max_steps // max(1, num_sections))) == 0 and teacher_model is not None:
                 teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
 
         # eval
-        if (i % runtime_cfg.eval_interval) == 0:
+        if (step % runtime_cfg.eval_interval) == 0:
             eval_model(cfg,
                        dit.module if is_ddp else dit,
                        (dit.module if is_ddp else dit) if ema_model is None else None,  # pass a real ema_model if you keep a separate module
-                       step=i,
+                       step=step,
                        dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True, runtime_cfg.debug_overfit),
                        dataset_valid_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit),
                        vae_encode=vae_encode_bhwc,
@@ -455,11 +455,11 @@ def main():
                        truth_fid_stats=truth_fid_stats)
 
         # save
-        if (i % runtime_cfg.save_interval) == 0 and runtime_cfg.save_dir:
+        if (step % runtime_cfg.save_interval) == 0 and runtime_cfg.save_dir:
             if (not is_ddp) or rank == 0:
                 os.makedirs(runtime_cfg.save_dir, exist_ok=True)
-                ckpt_path = os.path.join(runtime_cfg.save_dir, f"model_step_{i}.pt")
-                save_checkpoint(ckpt_path, dit.module if is_ddp else dit, opt, step=i, ema=ema_model)
+                ckpt_path = os.path.join(runtime_cfg.save_dir, f"model_step_{step}.pt")
+                save_checkpoint(ckpt_path, dit.module if is_ddp else dit, opt, step=step, ema=ema_model)
                 print(f"[save] {ckpt_path}")
 
         # update bar
