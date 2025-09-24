@@ -55,12 +55,12 @@ def _seed_worker(worker_id):
 def _identity(x):  # top-level = picklable
     return x
 
-def _find_shards(root: str, split: str):
+def _find_shards(direc: str, split: str):
     pat = f"imagenet2012-{split}.tfrecord-"
     return sorted(
-        os.path.join(root, f)
-        for f in os.listdir(root)
-        if f.startswith(pat) and not f.endswith(".index") and os.path.isfile(os.path.join(root, f))
+        os.path.join(direc, f)
+        for f in os.listdir(direc)
+        if f.startswith(pat) and not f.endswith(".index") and os.path.isfile(os.path.join(direc, f))
     )
 
 
@@ -72,17 +72,23 @@ def _ensure_index(tfr_path: str, index_root: str) -> str:
     return idx_path
 
 
-def _ensure_all_indexes(shards, index_root: str, world=1, rank=0):
+def _ensure_all_indexes(shards, index_root: str, world: int = 1, rank: int = 0):
     os.makedirs(index_root, exist_ok=True)
-    if world > 1 and dist.is_available() and dist.is_initialized():
+    idxs = [os.path.join(index_root, os.path.basename(p) + ".index") for p in shards]
+
+    if world > 1:
         if rank == 0:
             for p in shards:
-                _ensure_index(p, index_root)
-        dist.barrier()
-        # everyone returns the same index paths under index_root
-        return [os.path.join(index_root, os.path.basename(p) + ".index") for p in shards]
+                _ensure_index(p, index_root)        # creates only if missing
+        else:
+            for ip in idxs:                         # wait for rank 0 to write them
+                while not os.path.isfile(ip):
+                    time.sleep(0.1)
     else:
-        return [_ensure_index(p, index_root) for p in shards]
+        for p in shards:
+            _ensure_index(p, index_root)
+
+    return idxs
 
 
 # optional: useful for __len__
@@ -102,9 +108,9 @@ def _build_desc(img_key=_IMG_KEY, label_key=_LABEL_KEY):
 
 
 class ImageNetTFRecord(IterableDataset):
-    def __init__(self, root: str, split: str, world: int, rank: int, image_size: int = 256):
+    def __init__(self, ds_root: str, split: str, world: int, rank: int, image_size: int = 256):
         self.world, self.rank = max(1, world), rank
-        self.shards  = _find_shards(root, split)
+        self.shards  = _find_shards(ds_root, split)
         index_root = r'./data/imagenet_index_dir'
         self.indexes = _ensure_all_indexes(self.shards, index_root, self.world, self.rank)
         # use your schema
@@ -146,11 +152,11 @@ class ImageNetTFRecord(IterableDataset):
                 yield x_chw, torch.tensor(label, dtype=torch.long)
 
 
-def get_imagenet_tfrecord_iter(root, per_rank_bs, train, world, rank, image_size=256, debug_overfit=0):
-    ds = ImageNetTFRecord(root, "train" if train else "validation", world, rank, image_size=image_size)
+def get_imagenet_tfrecord_iter(ds_root, per_rank_bs, train, world, rank, image_size=256, debug_overfit=0):
+    ds = ImageNetTFRecord(ds_root, "train" if train else "validation", world, rank, image_size=image_size)
 
     # Windows uses spawn ⇒ start with num_workers=0; on Linux you can bump it
-    num_workers = 0 if os.name == "nt" else _auto_workers(world)
+    num_workers = 2 #if os.name == "nt" else _auto_workers(world)
 
     loader = DataLoader(
         ds,
@@ -171,7 +177,7 @@ def get_imagenet_tfrecord_iter(root, per_rank_bs, train, world, rank, image_size
     return _iter()
 
 
-def _get_imagenet_iter(root: str, batch_size: int, train: bool, debug_overfit: int, image_size: int = 256):
+def _get_imagenet_iter(dataset_root_dir: str, batch_size: int, train: bool, debug_overfit: int, image_size: int = 256):
     """
     ImageNet (TFRecord shards) → iterator yielding (images_bhwc, labels) on GPU.
     Expects shards like: imagenet2012-{train|val}.tfrecord-00000-of-01024
@@ -183,17 +189,17 @@ def _get_imagenet_iter(root: str, batch_size: int, train: bool, debug_overfit: i
     #root = os.environ.get("IMAGENET_TFRECORD_ROOT", "./data/imagenet-tfrecords")
     try:
         return get_imagenet_tfrecord_iter(
-            root=root,
+            ds_root=dataset_root_dir,
             per_rank_bs=batch_size,   # <-- this is already per-GPU
             train=train,
             world=world,
             rank=rank,
-            image_size=image_size,
             debug_overfit=debug_overfit,
+            image_size=image_size
         )
     except FileNotFoundError as e:
         raise ValueError(
-            f"Could not find ImageNet TFRecord shards under '{root}'. "
+            f"Could not find ImageNet TFRecord shards under '{dataset_root_dir}'. "
             f"Set IMAGENET_TFRECORD_ROOT to the folder with files like "
             f"'imagenet2012-train.tfrecord-00000-of-01024'."
         ) from e

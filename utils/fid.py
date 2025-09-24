@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from torchvision.models import inception_v3, Inception_V3_Weights
 from torchvision.models.feature_extraction import create_feature_extractor
+from scipy.linalg import sqrtm  # <-- add this
 
 @torch.no_grad()
 def get_fid_network(device=None):
@@ -31,12 +32,15 @@ def _stats(acts: np.ndarray):
     return mu, sigma
 
 def fid_from_stats(mu1, sigma1, mu2, sigma2, eps=1e-6):
-    # Standard FID formula
+    # add eps for numerical stability
+    sigma1 = sigma1 + np.eye(sigma1.shape[0]) * eps
+    sigma2 = sigma2 + np.eye(sigma2.shape[0]) * eps
+
     diff = mu1 - mu2
-    covmean, _ = np.linalg.sqrtm(sigma1 @ sigma2, disp=False)
-    if not np.isfinite(covmean).all():
-        offset = np.eye(sigma1.shape[0]) * eps
-        covmean = np.linalg.sqrtm((sigma1 + offset) @ (sigma2 + offset))
-    if np.iscomplexobj(covmean):
+    # use SciPy's sqrtm (NumPy doesn't have it)
+    covmean, _ = sqrtm(sigma1 @ sigma2, disp=False)
+    if np.iscomplexobj(covmean):      # small imaginary part can appear numerically
         covmean = covmean.real
-    return diff.dot(diff) + np.trace(sigma1 + sigma2 - 2 * covmean)
+
+    fid = diff @ diff + np.trace(sigma1 + sigma2 - 2.0 * covmean)
+    return float(fid)

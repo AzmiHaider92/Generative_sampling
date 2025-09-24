@@ -123,6 +123,7 @@ class DiTBlock(nn.Module):
         self.v = nn.Linear(hidden, hidden)
         self.proj = nn.Linear(hidden, hidden)
         self.norm2 = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.dropout = dropout
         self.mlp = MlpBlock(hidden, mlp_ratio, dropout, tc)
 
         self.ada = nn.Linear(hidden, 6 * hidden)  # to produce shift/scale/gate for attn & mlp
@@ -141,9 +142,18 @@ class DiTBlock(nn.Module):
         k = self.k(x_mod).view(B, L, H, C // H).transpose(1, 2)
         v = self.v(x_mod).view(B, L, H, C // H).transpose(1, 2)
         # Your JAX used q /= D; SDPA handles scaling internally; keep close to original:
-        q = q / (q.shape[-1])
-        attn = torch.softmax(torch.matmul(q, k.transpose(-2, -1)), dim=-1)  # [B,H,L,L]
-        y = torch.matmul(attn, v).transpose(1, 2).contiguous().view(B, L, C)
+        #q = q / (q.shape[-1])
+        #attn = torch.softmax(torch.matmul(q, k.transpose(-2, -1)), dim=-1)  # [B,H,L,L]
+        #y = torch.matmul(attn, v).transpose(1, 2).contiguous().view(B, L, C)
+        y = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=None,
+                dropout_p=(self.dropout if self.training else 0.0)  # or define self.attn_drop in __init__
+                ,is_causal=False
+                )  # [B,H,L,D]
+
+        y = y.transpose(1, 2).contiguous().view(B, L, C)
+
         y = self.proj(y)
         x = x + gate_msa[:, None, :] * y
 
@@ -258,4 +268,4 @@ class DiT(nn.Module):
 
         if return_activations:
             return out, logvars, activ
-        return out
+        return out, None, None

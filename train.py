@@ -69,6 +69,15 @@ def print_gpu_info(rank=0, world_size=1, local_rank=0):
 
 # ---------------- Train ----------------
 def main():
+    try:
+        from torch.backends.cuda import sdp_kernel
+        sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True)
+    except Exception:
+        # older PyTorch fallback
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+
     is_ddp, device, rank, world, local_rank = ddp_setup()
     print_gpu_info(rank, world, local_rank)
 
@@ -241,7 +250,7 @@ def main():
         t = t.to(dev, dtype=torch.float32, non_blocking=True)
         dt_base = dt_base.to(dev, dtype=torch.float32, non_blocking=True)
         labels = labels.to(dev, dtype=torch.long, non_blocking=True)
-        v_pred, _, _ = m(x_t, t, dt_base, labels, train=False, return_activations=True)
+        v_pred, _, _ = m(x_t, t, dt_base, labels, train=False, return_activations=False)
         return v_pred
 
     @torch.no_grad()
@@ -263,8 +272,8 @@ def main():
     # ----- eval/infer early exit -----
     if runtime_cfg.mode != "train":
         # build dataset iters again (not consumed)
-        dataset = get_dataset_iter(runtime_cfg.dataset_name, per_rank_bs, True, runtime_cfg.debug_overfit)
-        dataset_valid = get_dataset_iter(runtime_cfg.dataset_name, per_rank_bs, False, runtime_cfg.debug_overfit)
+        dataset = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True, runtime_cfg.debug_overfit)
+        dataset_valid = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit)
 
         do_inference(cfg, dit.module if is_ddp else dit,
                      (dit.module if is_ddp else dit),  # use same as ema for now
@@ -387,7 +396,7 @@ def main():
                 try:
                     vimg, vlbl = next(valid_iter)
                 except StopIteration:
-                    valid_iter = get_dataset_iter(runtime_cfg.dataset_name, per_rank_bs, False, runtime_cfg.debug_overfit)
+                    valid_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit)
                     vimg, vlbl = next(valid_iter)
                 vimg = maybe_encode(vimg)
                 with autocast('cuda', dtype=amp_dtype):
@@ -420,8 +429,8 @@ def main():
                        dit.module if is_ddp else dit,
                        (dit.module if is_ddp else dit) if ema_model is None else None,  # pass a real ema_model if you keep a separate module
                        step=i,
-                       dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, per_rank_bs, True, runtime_cfg.debug_overfit),
-                       dataset_valid_iter=get_dataset_iter(runtime_cfg.dataset_name, per_rank_bs, False, runtime_cfg.debug_overfit),
+                       dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True, runtime_cfg.debug_overfit),
+                       dataset_valid_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit),
                        vae_encode=vae_encode_bhwc,
                        vae_decode=vae_decode_bhwc,
                        update_fn=lambda imgs, lbls, force_t=-1, force_dt=-1: {
