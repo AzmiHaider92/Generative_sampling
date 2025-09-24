@@ -3,7 +3,7 @@ import os, math
 from dataclasses import asdict
 from datetime import datetime
 import copy
-
+import itertools
 import numpy as np
 import torch
 import torch.nn as nn
@@ -332,9 +332,18 @@ def main():
     ema_t = None
     EMA_EVERY = 10
     EMA_DECAY = 0.9999
+    step, max_steps = 0, runtime_cfg.max_steps  # e.g., 8001
 
-    for i, (batch_images, batch_labels) in enumerate(train_iter, start=1):
+    while step < max_steps:
         t0 = time.time()
+
+        try:
+            batch_images, batch_labels = next(train_iter)
+        except StopIteration:
+            train_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True,
+                                          runtime_cfg.debug_overfit)
+
+            batch_images, batch_labels = next(train_iter)
 
         batch_images = maybe_encode(batch_images)
 
