@@ -32,20 +32,20 @@ def eval_model(
     valid_images, valid_labels = next(dataset_valid_iter)
 
     # VAE encode to latents if needed (your JAX path does this before eval) :contentReference[oaicite:2]{index=2}
-    if cfg.model_cfg.use_stable_vae and 'latent' not in cfg.runtime_cfg.dataset_name:
+    if cfg.model_cfg.use_stable_vae:
         if vae_encode is None:
             raise RuntimeError("vae_encode required when use_stable_vae=1")
         batch_images = vae_encode(batch_images)
         valid_images = vae_encode(valid_images)
 
     # If dataset already provides latent pairs, split them like JAX (eps|img) :contentReference[oaicite:3]{index=3}
-    if 'latent' in cfg.runtime_cfg.dataset_name:
-        # Follow your file’s intent; the original had slicing typos in snippet,
-        # but the idea is (eps | x) along channel-last axis.
-        half = valid_images.shape[-1] // 2
-        eps_valid = valid_images[..., :half]
-        batch_images = batch_images[..., half:]
-        valid_images = valid_images[..., half:]
+    #if 'latent' in cfg.runtime_cfg.dataset_name:
+    #    # Follow your file’s intent; the original had slicing typos in snippet,
+    #    # but the idea is (eps | x) along channel-last axis.
+    #    half = valid_images.shape[-1] // 2
+    #    eps_valid = valid_images[..., :half]
+    #    batch_images = batch_images[..., half:]
+    #    valid_images = valid_images[..., half:]
 
     # Helper to render BHWC in [0,1], optionally via VAE decode :contentReference[oaicite:4]{index=4}
     def process_img(img_bhwc):
@@ -74,7 +74,7 @@ def eval_model(
                 bi, bl = next(dataset_iter)
             except StopIteration:
                 break
-            if cfg.model_cfg.use_stable_vae and 'latent' not in cfg.runtime_cfg.dataset_name and vae_encode is not None:
+            if cfg.model_cfg.use_stable_vae and vae_encode is not None:
                 bi = vae_encode(bi)
             # call your Torch update_fn in eval mode with force_t
             if update_fn is None:

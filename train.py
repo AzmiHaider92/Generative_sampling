@@ -67,6 +67,14 @@ def print_gpu_info(rank=0, world_size=1, local_rank=0):
     print("===================================")
 
 
+def ddp_mean_scalar(x: float, device):
+    t = torch.tensor([x], device=device, dtype=torch.float32)
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        t /= dist.get_world_size()
+    return float(t.item())
+
+
 # ---------------- Train ----------------
 def main():
     try:
@@ -102,12 +110,11 @@ def main():
     train_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True, runtime_cfg.debug_overfit)
     valid_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit)
     example_images, example_labels = next(train_iter)
-    H = example_images.shape[1]; W = example_images.shape[2]; C = example_images.shape[3]
 
     # ----- wandb -----
     if (not is_ddp) or rank == 0:
         # timestamped run name
-        ts = datetime.now().strftime("%m-%d-%H:%M")
+        ts = datetime.now().strftime("M%m-D%d-H%H_M%M")
         base_name = wandb_cfg.name.format(model_name=model_cfg.train_type, dataset_name=runtime_cfg.dataset_name)
         run_name = f"{base_name}_{ts}"
         runtime_cfg.save_dir = os.path.join(runtime_cfg.save_dir, run_name)
@@ -147,9 +154,18 @@ def main():
     else:
         vae_encode_bhwc = vae_decode_bhwc = None
 
+    def maybe_encode(x_bhwc):
+        if model_cfg.use_stable_vae and vae_encode_bhwc is not None and 'latent' not in runtime_cfg.dataset_name:
+            return vae_encode_bhwc(x_bhwc)
+        return x_bhwc
+
+    # one pass to know channels
+    example_images = maybe_encode(example_images)
+    H, C = example_images.shape[1], example_images.shape[-1]
+
     # If we're in latent dataset mode, split channels like JAX
-    if 'latent' in runtime_cfg.dataset_name:
-        example_images = example_images[..., example_images.shape[-1] // 2:]
+    #if 'latent' in runtime_cfg.dataset_name:
+    #    example_images = example_images[..., example_images.shape[-1] // 2:]
 
     # ----- FID -----
     if runtime_cfg.fid_stats is not None:
@@ -161,13 +177,13 @@ def main():
 
     # ----- model -----
     dit = DiT(
-        in_channels=example_images.shape[-1],
+        in_channels=C,
         patch_size=model_cfg.patch_size,
         hidden_size=model_cfg.hidden_size,
         depth=model_cfg.depth,
         num_heads=model_cfg.num_heads,
         mlp_ratio=model_cfg.mlp_ratio,
-        out_channels=(example_images.shape[-1] if not model_cfg.use_stable_vae else vae_encode_bhwc(example_images).shape[-1]),
+        out_channels=C,
         class_dropout_prob=model_cfg.class_dropout_prob,
         num_classes=runtime_cfg.num_classes,
         dropout=model_cfg.dropout,
@@ -292,13 +308,7 @@ def main():
     # ----- training loop -----
     gen = torch.Generator(device=device).manual_seed(runtime_cfg.seed)
 
-    def maybe_encode(x_bhwc):
-        if model_cfg.use_stable_vae and vae_encode_bhwc is not None and 'latent' not in runtime_cfg.dataset_name:
-            return vae_encode_bhwc(x_bhwc)
-        return x_bhwc
 
-    # one pass to know channels
-    example_images = maybe_encode(example_images)
 
 
     ################################################################################################################
@@ -309,10 +319,10 @@ def main():
     #  \__|_|  \__,_|_|_| |_|
     #
     ################################################################################################################
-    
-    print("==========================================================================")
-    print("====================== start training loop ===============================")
-    print("==========================================================================")
+    if rank == 0:  # only rank 0 prints
+        print("==========================================================================")
+        print("====================== start training loop ===============================")
+        print("==========================================================================")
     
     #pbar = tqdm(range(global_step + 1, runtime_cfg.max_steps + 1),
     #            disable=is_ddp and rank != 0, dynamic_ncols=True)
@@ -320,15 +330,11 @@ def main():
     accum_steps = 1  # set >1 if you use gradient accumulation
     pbar = tqdm(total=runtime_cfg.max_steps + 1, dynamic_ncols=True)
     ema_t = None
+    EMA_EVERY = 10
+    EMA_DECAY = 0.9999
 
-    for i, (batch_images, batch_labels) in enumerate(train_iter):
+    for i, (batch_images, batch_labels) in enumerate(train_iter, start=1):
         t0 = time.time()
-        # fetch batch
-        #try:
-        #    batch_images, batch_labels = next(train_iter)
-        #except StopIteration:
-        #    train_iter = get_dataset_iter(runtime_cfg.dataset_name, per_rank_bs, True, runtime_cfg.debug_overfit)
-        #    batch_images, batch_labels = next(train_iter)
 
         batch_images = maybe_encode(batch_images)
 
@@ -355,7 +361,7 @@ def main():
         # forward + loss
         opt.zero_grad(set_to_none=True)
         with autocast('cuda', dtype=amp_dtype):
-            v_pred, logvars, activ = (dit)(x_t, t_vec, dt_base, labels_eff, train=True, return_activations=True)
+            v_pred, _, _ = (dit)(x_t, t_vec, dt_base, labels_eff, train=True, return_activations=False)
             mse = ((v_pred - v_t) ** 2).mean(dim=(1, 2, 3))
             loss = mse.mean()
 
@@ -366,53 +372,50 @@ def main():
         else:  # BF16 / full-precision path
             loss.backward()
             opt.step()
-        
-        # debug (unused layers/params)
-        #if int(os.environ.get("RANK", "0")) == 0:
-        #    unused = [n for n,p in dit.named_parameters() if p.requires_grad and p.grad is None]
-        #    if unused:
-        #        print("UNUSED PARAMS:", unused[:20], "… count:", len(unused))
 
         # EMA update
-        if model_cfg.use_ema and ema_model is not None:
-            ema_model.update(dit.module if is_ddp else dit)
+        if model_cfg.use_ema and ema_model is not None and (i % EMA_EVERY == 0):
+            ema_model.update(dit.module if is_ddp else dit, decay=EMA_DECAY ** EMA_EVERY)
 
         # log (every log_interval)
-        if ((i % runtime_cfg.log_interval) == 0) or (i == 1):
-            with torch.no_grad():
-                train_metrics = {
-                    "training/loss": float(loss.detach().cpu()),
-                    "training/v_magnitude_prime": float(v_pred.square().mean().sqrt().detach().cpu()),
-                    "training/grad_norm": float(torch.nn.utils.clip_grad_norm_((dit.module if is_ddp else dit).parameters(), max_norm=float('inf')).detach().cpu()),
-                    "training/param_norm": float(sum(p.data.norm().item() ** 2 for p in (dit.module if is_ddp else dit).parameters()) ** 0.5),
-                    "training/lr": lr_sched(i),
-                }
-                # split bootstrap vs flow (for shortcut/livereflow)
-                if model_cfg.train_type in ("shortcut", "livereflow"):
-                    bs = runtime_cfg.batch_size // model_cfg.bootstrap_every
-                    train_metrics["training/loss_bootstrap"] = float(mse[:bs].mean().detach().cpu())
-                    train_metrics["training/loss_flow"] = float(mse[bs:].mean().detach().cpu())
-                # simple valid pass (one batch)
+        if ((i % runtime_cfg.log_interval) == 0):
+            # cheap scalars on every rank, averaged like JAX
+            train_loss_mean = ddp_mean_scalar(float(loss.detach().cpu()), device)
+            vmag_mean = ddp_mean_scalar(float(v_pred.square().mean().sqrt().detach().cpu()), device)
+            lr_mean = ddp_mean_scalar(float(lr_sched(i)), device)
+
+            # quick, single-rank validation (no activations)
+            if (not is_ddp) or rank == 0:
                 try:
                     vimg, vlbl = next(valid_iter)
                 except StopIteration:
-                    valid_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit)
+                    valid_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
+                                                  per_rank_bs, False, runtime_cfg.debug_overfit)
                     vimg, vlbl = next(valid_iter)
-                vimg = maybe_encode(vimg)
-                with autocast('cuda', dtype=amp_dtype):
-                    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = (
-                        get_targets(cfg, gen, call_model, vimg, vlbl)
-                        if model_cfg.train_type in ("naive", "shortcut", "livereflow")
-                        else (get_targets(cfg, gen, call_model_teacher, vimg, vlbl, step=i)
-                              if model_cfg.train_type == "progressive"
-                              else get_targets(cfg, gen, call_model_student_ema, vimg, vlbl))
-                    )
-                    v_pred2, _, _ = (dit)(v_x_t, v_t_vec, v_dt, v_lbl, train=False, return_activations=True)
-                    v_loss = ((v_pred2 - v_v_t) ** 2).mean(dim=(1,2,3)).mean()
-                train_metrics["training/loss_valid"] = float(v_loss.detach().cpu())
 
-            if (not is_ddp) or rank == 0:
-                wandb.log(train_metrics, step=i)
+                vimg = maybe_encode(vimg)
+                vimg = vimg.to(device, non_blocking=True)
+                vlbl = vlbl.to(device, non_blocking=True)
+
+                with torch.inference_mode(), autocast('cuda', dtype=amp_dtype):
+                    if model_cfg.train_type in ("naive", "shortcut", "livereflow"):
+                        v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model, vimg, vlbl)
+                    elif model_cfg.train_type == "progressive":
+                        v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_teacher, vimg, vlbl,
+                                                                            step=i)
+                    else:  # "consistency" / "consistency-distillation"
+                        v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_student_ema, vimg,
+                                                                            vlbl)
+
+                    v_pred2, _, _ = dit(v_x_t, v_t_vec, v_dt, v_lbl, train=False, return_activations=False)
+                    v_loss = ((v_pred2 - v_v_t).pow(2).mean(dim=(1, 2, 3))).mean().item()
+
+                wandb.log({
+                    "training/loss": train_loss_mean,
+                    "training/v_magnitude_prime": vmag_mean,
+                    "training/lr": lr_mean,
+                    "training/loss_valid": v_loss,
+                }, step=i)
 
         # stepwise LR (optional)
         for g in opt.param_groups: g['lr'] = lr_sched(i)

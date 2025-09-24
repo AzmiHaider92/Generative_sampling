@@ -1,6 +1,4 @@
 import random
-from typing import Iterator, Tuple, List
-from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
@@ -8,8 +6,7 @@ import io, os
 from PIL import Image
 import torch
 from torch.utils.data import IterableDataset, DataLoader, get_worker_info
-import torch.distributed as dist
-
+import time
 # pip install tfrecord
 from tfrecord.torch.dataset import TFRecordDataset
 try:
@@ -24,14 +21,16 @@ class CenterSquare:
         s = min(img.size)  # (W,H)
         return TF.center_crop(img, s)
 
+
 def _to_minus1_1():
     return transforms.Normalize(mean=(0.5, 0.5, 0.5),
                                 std=(0.5, 0.5, 0.5))
 
+
 def _build_transform(image_size=256):
     return transforms.Compose([
-        CenterSquare(),
-        transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC),
+        #CenterSquare(),
+        #transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),     # [0,1], CHW
         _to_minus1_1(),            # [-1,1], CHW
     ])
@@ -156,7 +155,7 @@ def get_imagenet_tfrecord_iter(ds_root, per_rank_bs, train, world, rank, image_s
     ds = ImageNetTFRecord(ds_root, "train" if train else "validation", world, rank, image_size=image_size)
 
     # Windows uses spawn ⇒ start with num_workers=0; on Linux you can bump it
-    num_workers = 2 #if os.name == "nt" else _auto_workers(world)
+    num_workers = 0 if os.name == "nt" else _auto_workers(world)
 
     loader = DataLoader(
         ds,
