@@ -1,7 +1,7 @@
 import random
-from torchvision import transforms
+import torchvision.transforms as T
 import torchvision.transforms.functional as TF
-from torchvision.transforms import InterpolationMode
+from torchvision.transforms import InterpolationMode as IM
 import io, os
 from PIL import Image
 import torch
@@ -15,25 +15,50 @@ except Exception:
     _create_index = None
 
 
-# ----- same transforms as other loaders -----
-class CenterSquare:
-    def __call__(self, img: Image.Image):
-        s = min(img.size)  # (W,H)
-        return TF.center_crop(img, s)
+def _build_transform(is_train: bool):
+    # pick output size
+    target = 256
 
+    # crop to square of min(H,W), then resize -> (target, target)
+    def center_crop_square_then_resize(img):
+        # Works for PIL.Image or torch.Tensor
+        if isinstance(img, torch.Tensor):
+            # Tensor could be CHW or HWC
+            if img.ndim == 3 and img.shape[0] in (1, 3, 4):  # CHW
+                _, h, w = img.shape
+                s = min(h, w)
+                top = (h - s) // 2
+                left = (w - s) // 2
+                img = img[:, top:top+s, left:left+s]
+                img = TF.resize(img, [target, target], interpolation=IM.BICUBIC, antialias=True)
+                return img
+            elif img.ndim == 3:  # HWC
+                h, w, _ = img.shape
+                s = min(h, w)
+                top = (h - s) // 2
+                left = (w - s) // 2
+                img = img[top:top+s, left:left+s, :]
+                img = TF.resize(img.permute(2, 0, 1), [target, target], interpolation=IM.BICUBIC, antialias=True)
+                return img
+            else:
+                raise ValueError("Unexpected tensor shape for image.")
+        else:
+            # PIL.Image: size = (W, H)
+            s = min(img.size)
+            img = TF.center_crop(img, s)
+            img = TF.resize(img, (target, target), interpolation=IM.BICUBIC, antialias=True)
+            return img
 
-def _to_minus1_1():
-    return transforms.Normalize(mean=(0.5, 0.5, 0.5),
-                                std=(0.5, 0.5, 0.5))
+    tfms = [T.Lambda(center_crop_square_then_resize)]
+    if is_train:
+        tfms.append(T.RandomHorizontalFlip())
+    tfms += [
+        T.ToTensor(),                       # [0,1]
+        T.Normalize([0.5, 0.5, 0.5],        # -> [-1,1]
+                    [0.5, 0.5, 0.5]),
+    ]
+    return T.Compose(tfms)
 
-
-def _build_transform(image_size=256):
-    return transforms.Compose([
-        #CenterSquare(),
-        #transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC),
-        transforms.ToTensor(),     # [0,1], CHW
-        _to_minus1_1(),            # [-1,1], CHW
-    ])
 
 def _auto_workers(world: int) -> int:
     try:
@@ -43,6 +68,7 @@ def _auto_workers(world: int) -> int:
     per_rank = max(2, (cpus // max(world, 1)) - 2)
     return min(per_rank, 8)
 
+
 def _seed_worker(worker_id):
     seed = torch.initial_seed() % 2**32
     random.seed(seed)
@@ -51,8 +77,10 @@ def _seed_worker(worker_id):
     except Exception:
         pass
 
+
 def _identity(x):  # top-level = picklable
     return x
+
 
 def _find_shards(direc: str, split: str):
     pat = f"imagenet2012-{split}.tfrecord-"
@@ -107,15 +135,16 @@ def _build_desc(img_key=_IMG_KEY, label_key=_LABEL_KEY):
 
 
 class ImageNetTFRecord(IterableDataset):
-    def __init__(self, ds_root: str, split: str, world: int, rank: int, image_size: int = 256):
+    def __init__(self, ds_root: str, train: bool, world: int, rank: int, image_size: int = 256):
         self.world, self.rank = max(1, world), rank
+        split = "train" if train else "validation"
         self.shards  = _find_shards(ds_root, split)
         index_root = r'./data/imagenet_index_dir'
         self.indexes = _ensure_all_indexes(self.shards, index_root, self.world, self.rank)
         # use your schema
         self.img_key, self.label_key = _IMG_KEY, _LABEL_KEY
         self.desc    = _build_desc(self.img_key, self.label_key)
-        self.tfm     = _build_transform(image_size)
+        self.tfm     = _build_transform(train)
         # optional length estimate if you want
         self._size_rank = sum(_index_count(idx) for idx in self.indexes[self.rank::self.world])
 
@@ -152,7 +181,7 @@ class ImageNetTFRecord(IterableDataset):
 
 
 def get_imagenet_tfrecord_iter(ds_root, per_rank_bs, train, world, rank, image_size=256, debug_overfit=0):
-    ds = ImageNetTFRecord(ds_root, "train" if train else "validation", world, rank, image_size=image_size)
+    ds = ImageNetTFRecord(ds_root, train, world, rank, image_size=image_size)
 
     # Windows uses spawn ⇒ start with num_workers=0; on Linux you can bump it
     num_workers = 0 if os.name == "nt" else _auto_workers(world)
