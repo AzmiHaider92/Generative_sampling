@@ -24,6 +24,8 @@ from utils.stable_vae import StableVAE
 
 from helper_eval import eval_model
 from helper_inference import do_inference
+import torch.multiprocessing as mp
+mp.set_sharing_strategy("file_system")
 
 
 # ---------------- Utils ----------------
@@ -337,13 +339,15 @@ def main():
     while step < max_steps:
         t0 = time.time()
 
-        try:
-            batch_images, batch_labels = next(train_iter)
-        except StopIteration:
-            train_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True,
-                                          runtime_cfg.debug_overfit)
+        batch_images, batch_labels = next(train_iter)
 
-            batch_images, batch_labels = next(train_iter)
+        #try:
+        #    batch_images, batch_labels = next(train_iter)
+        #except StopIteration:
+        #    train_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True,
+        #                                  runtime_cfg.debug_overfit)
+
+        #    batch_images, batch_labels = next(train_iter)
 
         batch_images = maybe_encode(batch_images)
 
@@ -437,6 +441,7 @@ def main():
 
         # eval
         if (step % runtime_cfg.eval_interval) == 0:
+            print("================= evaluating =================")
             eval_model(cfg,
                        dit.module if is_ddp else dit,
                        (dit.module if is_ddp else dit) if ema_model is None else None,  # pass a real ema_model if you keep a separate module
@@ -449,13 +454,14 @@ def main():
                            "loss": float(loss.detach().cpu())
                        },  # lightweight placeholder; you can wire a true eval step if desired
                        get_fid_activations=get_fid_acts,
-                       imagenet_labels=open('data/imagenet_labels.txt').read().splitlines() if os.path.exists('data/imagenet_labels.txt') else None,
+                       imagenet_labels=open(os.path.join(runtime_cfg.dataset_root_dir, "label.labels.txt")).read().splitlines() if os.path.exists(os.path.join(runtime_cfg.dataset_root_dir, "label.labels.txt")) else None,
                        visualize_labels=None,
                        fid_from_stats=fid_from_stats,
                        truth_fid_stats=truth_fid_stats)
 
         # save
         if (step % runtime_cfg.save_interval) == 0 and runtime_cfg.save_dir:
+            print("================= saving a checkpoint =================")
             if (not is_ddp) or rank == 0:
                 os.makedirs(runtime_cfg.save_dir, exist_ok=True)
                 ckpt_path = os.path.join(runtime_cfg.save_dir, f"model_step_{step}.pt")
@@ -469,6 +475,8 @@ def main():
         if rank == 0:
             pbar.set_postfix_str(f"GBS={runtime_cfg.batch_size} img/s={imgs_per_sec:.0f} step={ema_t*1e3:.0f}ms")
             pbar.update(1)
+
+        step += 1
 
     if is_ddp:
         dist.barrier()

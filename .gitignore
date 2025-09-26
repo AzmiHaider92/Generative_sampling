@@ -1,4 +1,7 @@
 *.sqsh
+*.sh
+*.out
+*.err
 log/
 data/
 configs/

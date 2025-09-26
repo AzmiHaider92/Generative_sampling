@@ -184,24 +184,27 @@ def get_imagenet_tfrecord_iter(ds_root, per_rank_bs, train, world, rank, image_s
     ds = ImageNetTFRecord(ds_root, train, world, rank, image_size=image_size)
 
     # Windows uses spawn ⇒ start with num_workers=0; on Linux you can bump it
-    num_workers = 0 if os.name == "nt" else _auto_workers(world)
+    num_workers = 2 # 0 if os.name == "nt" else _auto_workers(world)
 
     loader = DataLoader(
         ds,
         batch_size=per_rank_bs,
         shuffle=False,                 # IterableDataset: do shuffling inside if needed
         num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=(num_workers > 0),
-        prefetch_factor=2 if num_workers > 0 else None,
+        pin_memory=False,
+        persistent_workers=False,
+        prefetch_factor=None,
         drop_last=True,
         worker_init_fn=_seed_worker if num_workers > 0 else None,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     def _iter():
-        for x_chw, y in loader:
-            yield x_chw.to(device, non_blocking=True).permute(0,2,3,1).contiguous(), y.to(device, non_blocking=True)
+        epoch = 0
+        while True:
+            for x_chw, y in loader:
+                yield x_chw.to(device, non_blocking=False).permute(0,2,3,1).contiguous(), y.to(device, non_blocking=False)
+            epoch +=1
     return _iter()
 
 
