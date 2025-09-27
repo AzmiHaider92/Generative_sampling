@@ -237,7 +237,7 @@ def main():
     # ----- targets dispatcher -----
     def import_targets(train_type: str):
         name = {
-            "naive": "baselines.targets_naive",
+            "flow_matching": "baselines.targets_flow_matching",
             "shortcut": "targets_shortcut",
             "progressive": "targets_progressive",
             "consistency-distillation": "targets_consistency_distillation",
@@ -321,19 +321,10 @@ def main():
         t0 = time.time()
 
         batch_images, batch_labels = next(train_iter)
-
-        #try:
-        #    batch_images, batch_labels = next(train_iter)
-        #except StopIteration:
-        #    train_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True,
-        #                                  runtime_cfg.debug_overfit)
-
-        #    batch_images, batch_labels = next(train_iter)
-
         batch_images = maybe_encode(batch_images)
 
         # targets per train_type
-        if model_cfg.train_type == 'naive':
+        if model_cfg.train_type == 'flow_matching':
             x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels)
         elif model_cfg.train_type == 'shortcut':
             x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
@@ -392,7 +383,7 @@ def main():
                 vlbl = vlbl.to(device, non_blocking=True)
 
                 with torch.inference_mode(), autocast('cuda', dtype=amp_dtype):
-                    if model_cfg.train_type in ("naive", "shortcut", "livereflow"):
+                    if model_cfg.train_type in ("flow_matching", "shortcut", "livereflow"):
                         v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, vimg, vlbl)
                     elif model_cfg.train_type == "progressive":
                         v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_teacher, vimg, vlbl,

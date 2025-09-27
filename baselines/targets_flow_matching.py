@@ -45,8 +45,8 @@ def get_targets(cfg, gen, images, labels):
     x1 = images
     x0 = torch.randn(images.shape, dtype=images.dtype, device=images.device, generator=gen)
 
-    x_t = (1.0 - (1.0 - 1e-5) * t_full) * x0 + t_full * x1
-    v_t = x1 - (1.0 - 1e-5) * x0
+    x_t = (1.0 - t_full) * x0 + t_full * x1
+    v_t = x1 - x0
 
     dt_flow = int(math.log2(cfg.model_cfg.denoise_timesteps))
     dt_base = torch.full((B,), dt_flow, device=device, dtype=torch.float32)
