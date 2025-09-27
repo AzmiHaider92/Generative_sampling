@@ -393,7 +393,7 @@ def main():
 
                 with torch.inference_mode(), autocast('cuda', dtype=amp_dtype):
                     if model_cfg.train_type in ("naive", "shortcut", "livereflow"):
-                        v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model, vimg, vlbl)
+                        v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, vimg, vlbl)
                     elif model_cfg.train_type == "progressive":
                         v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_teacher, vimg, vlbl,
                                                                             step=step)
