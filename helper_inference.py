@@ -19,6 +19,8 @@ def do_inference(
     vae_decode=None,
 ):
     device = next(model.parameters()).device
+    was_training = model.training
+    was_training_ema = (ema_model.training if ema_model is not None else None)
     model.eval()
     if ema_model is not None:
         ema_model.eval()
@@ -145,6 +147,13 @@ def do_inference(
         np.save(os.path.join(cfg.runtime_cfg.save_dir, "x1.npy"), np.concatenate(all_x1, axis=0))
         np.save(os.path.join(cfg.runtime_cfg.save_dir, "labels.npy"), np.concatenate(all_labels, axis=0))
 
-    model.train()
+    # restore original modes
+    if was_training:
+        model.train()
+    else:
+        model.eval()
     if ema_model is not None:
-        ema_model.train()
+        if was_training_ema:
+            ema_model.train()
+        else:
+            ema_model.eval()
