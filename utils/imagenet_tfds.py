@@ -184,7 +184,7 @@ def get_imagenet_tfrecord_iter(ds_root, per_rank_bs, train, world, rank, image_s
     ds = ImageNetTFRecord(ds_root, train, world, rank, image_size=image_size)
 
     # Windows uses spawn ⇒ start with num_workers=0; on Linux you can bump it
-    num_workers = 2 # 0 if os.name == "nt" else _auto_workers(world)
+    num_workers = 0 if os.name == "nt" else 2
 
     loader = DataLoader(
         ds,

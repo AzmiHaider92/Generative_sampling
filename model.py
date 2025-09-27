@@ -1,10 +1,10 @@
-# model(torch).py
 from dataclasses import dataclass
-from typing import Dict, Tuple, Optional
+from typing import Optional
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 # ------- Positional encodings (2D sin-cos) -------
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
@@ -14,6 +14,7 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     out = torch.einsum('m,d->md', pos.reshape(-1), omega)
     emb = torch.cat([torch.sin(out), torch.cos(out)], dim=1)
     return emb
+
 
 def get_2d_sincos_pos_embed(embed_dim, length, device):
     grid_size = int(length ** 0.5)
@@ -27,6 +28,7 @@ def get_2d_sincos_pos_embed(embed_dim, length, device):
     emb = torch.cat([emb_h, emb_w], dim=1)  # [H*W, D]
     return emb.unsqueeze(0)  # [1, H*W, D]
 
+
 # ------- Small helpers -------
 def modulate(x, shift, scale):
     # Match your JAX model.py version (no clipping inside modulate).
@@ -34,11 +36,14 @@ def modulate(x, shift, scale):
     # x: [B, L, C], shift/scale: [B, C]
     return x * (1 + scale[:, None, :]) + shift[:, None, :]
 
+
 @dataclass
 class TrainConfig:
     dtype: torch.dtype = torch.bfloat16
+
     def default_kwargs(self):
         return dict(dtype=self.dtype)
+
 
 # ------- Building blocks -------
 class TimestepEmbedder(nn.Module):
@@ -68,11 +73,13 @@ class TimestepEmbedder(nn.Module):
             x = x.to(self.tc.dtype)
         return x
 
+
 class LabelEmbedder(nn.Module):
     def __init__(self, num_classes: int, hidden_size: int, tc: TrainConfig):
         super().__init__()
         self.emb = nn.Embedding(num_classes + 1, hidden_size)  # +1 for null token
         self.tc = tc
+
     def forward(self, labels):  # [B] int64
         return self.emb(labels)
 
@@ -93,7 +100,7 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x_bhwc):
         B, H, W, C = x_bhwc.shape
-        x = x_bhwc.permute(0,3,1,2).contiguous()
+        x = x_bhwc.permute(0, 3, 1, 2).contiguous()
         x = self.proj(x)
         x = x.flatten(2).transpose(1,2)
         return x, (H // self.proj.kernel_size[0], W // self.proj.kernel_size[0])
@@ -106,10 +113,12 @@ class MlpBlock(nn.Module):
         self.fc1 = nn.Linear(hidden, inner)
         self.fc2 = nn.Linear(inner, hidden)
         self.drop = nn.Dropout(dropout)
+
     def forward(self, x):
         x = self.drop(F.gelu(self.fc1(x), approximate="tanh"))
         x = self.drop(self.fc2(x))
         return x
+
 
 class DiTBlock(nn.Module):
     def __init__(self, hidden: int, heads: int, mlp_ratio: float, dropout: float, tc: TrainConfig):
@@ -163,6 +172,7 @@ class DiTBlock(nn.Module):
         x = x + gate_mlp[:, None, :] * self.mlp(x_mod2)
         return x
 
+
 class FinalLayer(nn.Module):
     def __init__(self, patch_size: int, out_channels: int, hidden: int, tc: TrainConfig):
         super().__init__()
@@ -171,12 +181,14 @@ class FinalLayer(nn.Module):
         self.proj = nn.Linear(hidden, patch_size * patch_size * out_channels)
         self.patch = patch_size
         self.outc = out_channels
+
     def forward(self, x, c):
         c = F.silu(c)
         shift, scale = self.to_mod(c).chunk(2, dim=-1)
         x = modulate(self.norm(x), shift, scale)
         x = self.proj(x)  # [B, L, P*P*C]
         return x
+
 
 class DiT(nn.Module):
     """
