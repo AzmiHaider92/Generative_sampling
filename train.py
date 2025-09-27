@@ -443,6 +443,17 @@ def main():
 
         step += 1
 
+    do_inference(cfg,
+                 dit.module if is_ddp else dit,
+                 (dit.module if is_ddp else dit) if ema_model is None else None,
+                 # pass a real ema_model if you keep a separate module
+                 dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
+                                               per_rank_bs, True, runtime_cfg.debug_overfit),
+                 vae_encode=vae_encode_bhwc,
+                 vae_decode=vae_decode_bhwc,
+                 num_generations=50000,
+                 calc_fid=True)
+
     if is_ddp:
         dist.barrier()
         dist.destroy_process_group()

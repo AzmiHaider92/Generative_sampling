@@ -21,7 +21,6 @@ class RuntimeCfg:
     debug_overfit: int = 0
     mode: str = "train"  # train | inference
     inference_timesteps: int = 128
-    inference_generations: int = 4096
     inference_cfg_scale: int = 1.0
 
 
@@ -30,7 +29,7 @@ class ModelCfg:
     lr: float = 1e-4
     beta1: float = 0.9
     beta2: float = 0.999
-    weight_decay: float = 0.1
+    weight_decay: float = 0.0
     use_cosine: int = 0
     warmup: int = 0
     dropout: float = 0.0

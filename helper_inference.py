@@ -17,6 +17,8 @@ def do_inference(
     dataset_iter,
     vae_encode=None,
     vae_decode=None,
+    num_generations=8,
+    calc_fid=False,
 ):
     device = next(model.parameters()).device
     was_training = model.training
@@ -27,7 +29,7 @@ def do_inference(
 
     # for fid calc
     fid = None
-    if cfg.runtime_cfg.fid_stats is not None:
+    if (cfg.runtime_cfg.fid_stats is not None) and calc_fid:
         # Metric on GPU; disable AMP for numerical stability
         fid = FrechetInceptionDistance(
             feature=2048,
@@ -50,15 +52,15 @@ def do_inference(
 
     images_shape = batch_images.shape
     denoise_timesteps = cfg.runtime_cfg.inference_timesteps
-    num_generations = cfg.runtime_cfg.inference_generations
+    #num_generations = cfg.runtime_cfg.inference_generations
     cfg_scale = cfg.runtime_cfg.inference_cfg_scale
     nimgs_2_vis, imgs_2_vis = 0, []
 
     print(f"Sampling cfg={cfg_scale} with T={denoise_timesteps} for {num_generations} images")  # :contentReference[oaicite:11]{index=11}
 
-    B = cfg.runtime_cfg.batch_size
+    B = images_shape[0]
     delta_t = 1.0 / denoise_timesteps
-    all_x0, all_x1, all_labels = [], [], []
+    #all_x0, all_x1, all_labels = [], [], []
 
     # Internal callable to run model (EMA if available) like your JAX call_model() wrapper. :contentReference[oaicite:12]{index=12}
     def call_model(x, t_vector, dt_base, labels, use_ema=True):
@@ -78,13 +80,13 @@ def do_inference(
     for fid_it in tqdm.tqdm(range(num_generations // B)):
         # New noise + labels every chunk, like JAX: x ~ N(0,I), labels ~ Uniform classes. :contentReference[oaicite:14]{index=14}
         x = torch.randn(images_shape, device=device)
-        labels = torch.randint(0, cfg.runtime_cfg.num_classes, (images_shape[0],), device=device, dtype=torch.long)
-        all_x0.append(x.detach().cpu().numpy())
+        labels = torch.randint(0, cfg.runtime_cfg.num_classes, (B,), device=device, dtype=torch.long)
+        #all_x0.append(x.detach().cpu().numpy())
 
         for ti in range(denoise_timesteps):
             t = ti / denoise_timesteps
-            t_vector = torch.full((images_shape[0],), t, device=device, dtype=torch.float32)
-            dt_base = make_dt_base(images_shape[0])
+            t_vector = torch.full((B,), t, device=device, dtype=torch.float32)
+            dt_base = make_dt_base(B)
 
             if cfg_scale == 1:
                 v = call_model(x, t_vector, dt_base, labels, use_ema=True)
@@ -115,8 +117,8 @@ def do_inference(
             x_vis = x_vis.clamp(0.0, 1.0)
             x1 = x_vis.permute(0, 3, 1, 2)
 
-        all_x1.append(x1.detach().cpu().numpy())
-        all_labels.append(labels.detach().cpu().numpy())
+        #all_x1.append(x1.detach().cpu().numpy())
+        #all_labels.append(labels.detach().cpu().numpy())
 
         if nimgs_2_vis < 8: # visualize just 8, hardcoded
             imgs_2_vis.append(x1)
@@ -131,21 +133,17 @@ def do_inference(
         # Compute FID
         with torch.cuda.amp.autocast(enabled=False):
             score = fid.compute().item()
-        print(f"FID = {score:.4f}  (N={num_generations})")
+        print(f"============== FID = {score:.4f}  (N={num_generations}) ====================")
 
-    imgs = torch.cat(imgs_2_vis, dim=0)  #
-    imgs = imgs[:8] # visualize just 8, hardcoded
+    imgs = torch.cat(imgs_2_vis, dim=0)
 
-    grid = vutils.make_grid(
-        imgs, nrow=4, padding=2,
-        normalize=True, value_range=(-1, 1)  # set normalize=False if already in [0,1]
-    )
+    grid = vutils.make_grid(imgs, nrow=4, padding=2, normalize=False)
     wandb.log({"Generated samples": wandb.Image(grid)})
     # Optionally save raw arrays for later analysis
-    if cfg.runtime_cfg.save_dir is not None:
-        np.save(os.path.join(cfg.runtime_cfg.save_dir, "x0.npy"), np.concatenate(all_x0, axis=0))
-        np.save(os.path.join(cfg.runtime_cfg.save_dir, "x1.npy"), np.concatenate(all_x1, axis=0))
-        np.save(os.path.join(cfg.runtime_cfg.save_dir, "labels.npy"), np.concatenate(all_labels, axis=0))
+    #if cfg.runtime_cfg.save_dir is not None:
+    #    np.save(os.path.join(cfg.runtime_cfg.save_dir, "x0.npy"), np.concatenate(all_x0, axis=0))
+    #    np.save(os.path.join(cfg.runtime_cfg.save_dir, "x1.npy"), np.concatenate(all_x1, axis=0))
+    #    np.save(os.path.join(cfg.runtime_cfg.save_dir, "labels.npy"), np.concatenate(all_labels, axis=0))
 
     # restore original modes
     if was_training:
