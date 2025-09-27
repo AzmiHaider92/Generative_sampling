@@ -5,9 +5,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 from tqdm import tqdm
-
 from utils.datasets import get_dataset as get_dataset_iter
-
 from utils.imagenet_tfds import ImageNetTFRecord
 
 
@@ -39,43 +37,44 @@ def make_real_stats(
         antialias=True,
     ).to(device)
 
-    steps = 0
+    imgs_seen = 0
+    pbar = tqdm(total=None, unit="img")  # no fixed total; count images instead
     fid.eval()
     with torch.no_grad():
-        for batch in tqdm(loader):
-            # Support (images, labels) or dicts
-            if isinstance(batch, (list, tuple)):
-                images = batch[0]
-            elif isinstance(batch, dict):
-                images = batch["image"]
-            else:
-                images = batch
+        for batch in loader:
+            images = batch[0]
 
             images = images.to(device, non_blocking=True)
 
             # If your pipeline yields [-1,1], convert to [0,1]
-            if from_neg1_to_unit_range:
-                images = (images + 1.0) * 0.5
+            images = (images + 1.0) * 0.5
             images = images.clamp(0.0, 1.0)
             #images = images.permute(0, 3, 1, 2).contiguous()  # NHWC -> NCHW
 
             # Update real stats
             fid.update(images, real=True)
-            steps +=1
+            imgs_seen += images.shape[0]
+            pbar.update(images.shape[0])
 
     # Save only the metric state (compact: sums, counts, etc.), not raw features
-    torch.save(fid.state_dict(), stats_out_path)
+    stats = {
+            "real_features_sum":         fid.real_features_sum.detach().cpu(),
+            "real_features_cov_sum":     fid.real_features_cov_sum.detach().cpu(),
+            "real_features_num_samples": fid.real_features_num_samples.detach().cpu(),
+            "feature_dim":               2048,  # for safety
+            }
+    torch.save(stats, stats_out_path)
     print(f"Saved real FID stats to: {stats_out_path}")
-    return steps
+    return imgs_seen
 
 
 if __name__ == "__main__":
-    ds_root = r'C:\Users\azmih\Desktop\Projects\datasets\imagenet2012\5.1.0'
+    ds_root = r'/mnt/Generative_sampling/data/imagenet_256'
     batch_size = 32
     ds = ImageNetTFRecord(ds_root, True, 1, 0, image_size=256)
 
     # Windows uses spawn ⇒ start with num_workers=0; on Linux you can bump it
-    num_workers = 0 if os.name == "nt" else 2
+    num_workers = 0 if os.name == "nt" else 1
 
     loader = DataLoader(
         ds,
@@ -91,8 +90,8 @@ if __name__ == "__main__":
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    steps = make_real_stats(loader,
-    stats_out_path=r"C:\Users\azmih\Desktop\Projects\Generative_sampling\data\imagenet256_fidstats_gt.pt",
+    num_images = make_real_stats(loader,
+    stats_out_path=r"/mnt/Generative_sampling/data/imagenet256_fidstats_gt.pt",
     device=device,
     from_neg1_to_unit_range=True)
-    print(f"ran for {steps} steps, in total {steps*batch_size} images")
+    print(f"Number of images seen in fid calc: {num_images}")
