@@ -77,7 +77,7 @@ def do_inference(
             dt_flow = int(np.log2(denoise_timesteps))
         return torch.full((n,), dt_flow, device=device, dtype=torch.float32)
 
-    for fid_it in tqdm.tqdm(range(num_generations // B)):
+    for fid_it in tqdm.tqdm(range(max(num_generations // B, 1))):
         # New noise + labels every chunk, like JAX: x ~ N(0,I), labels ~ Uniform classes. :contentReference[oaicite:14]{index=14}
         x = torch.randn(images_shape, device=device)
         labels = torch.randint(0, cfg.runtime_cfg.num_classes, (B,), device=device, dtype=torch.long)
@@ -136,6 +136,7 @@ def do_inference(
         print(f"============== FID = {score:.4f}  (N={num_generations}) ====================")
 
     imgs = torch.cat(imgs_2_vis, dim=0)
+    imgs = imgs[:8]
 
     grid = vutils.make_grid(imgs, nrow=4, padding=2, normalize=False)
     wandb.log({"Generated samples": wandb.Image(grid)})
