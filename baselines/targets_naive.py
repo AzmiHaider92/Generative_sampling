@@ -3,34 +3,52 @@ import torch
 import math
 
 @torch.no_grad()
-def get_targets(FLAGS, gen, call_model, images, labels, force_t=-1, force_dt=-1):
+def get_targets(cfg, gen, images, labels):
+    # Returns
+    # ------------------------------------------------------------------------------------------------------------------
+    # x_t: torch.Tensor, shapelike x0 / x1 Interpolated point between x0 and x1 at time t:
+    #      x_t = (1 - (1 - eps) * t) * x0 + t * x1 ---- with eps = 1e-5 to avoid degeneracy at t=1.
+    #
+    # v_t : torch.Tensor, same shape as x_t
+    #       The (approximate) “velocity” target of the straight-line flow:
+    #       v_t = x1 - (1 - eps) * x0
+    #       Note: constant in t under this parameterization; pairs with x_t to train flow-matching / shortcut operators.
+    #
+    # t_vec : torch.FloatTensor, shape [B]
+    #         Per-sample normalized times in [0,1]. If `force_t>=0`, then all entries are that value.
+    #
+    # dt_base : torch.FloatTensor, shape [B]
+    #           A coarse log2 step scale: dt_base = log2(denoise_timesteps)
+    #           Broadcast as a per-sample scalar. This can be used as a baseline step-size feature
+    #           or conditioning for schedulers / shortcut models.
+    #
+    # labels_eff : torch.LongTensor, shape [B]
+    #              Effective labels after classifier-free dropout:
+    #              with probability p=class_dropout_prob, label = num_classes (the null label);
+    #              else label = original class id.
+
     info = {}
     B = images.shape[0]
     device = images.device
 
     # label dropout for CFG
-    mask = torch.bernoulli(torch.full((B,), FLAGS.model['class_dropout_prob'], device=device)).bool()
-    labels_dropped = torch.where(mask, torch.full_like(labels, FLAGS.model['num_classes']), labels)
-    info['dropped_ratio'] = (labels_dropped == FLAGS.model['num_classes']).float().mean()
+    mask = torch.bernoulli(torch.full((B,), cfg.model_cfg.class_dropout_prob, device=device)).bool()
+    labels_dropped = torch.where(mask, torch.full_like(labels, cfg.runtime_cfg.num_classes), labels)
+    info['dropped_ratio'] = (labels_dropped == cfg.runtime_cfg.num_classes).float().mean()
 
     # t in [0,1]
-    t = torch.randint(0, FLAGS.model['denoise_timesteps'], (B,), generator=gen, device=device).float()
-    t = t / float(FLAGS.model['denoise_timesteps'])
-    if force_t != -1:
-        t = torch.full_like(t, float(force_t))
+    t = torch.randint(0, cfg.model_cfg.denoise_timesteps, (B,), generator=gen, device=device).float()
+    t = t / float(cfg.model_cfg.denoise_timesteps)
     t_full = t.view(B, 1, 1, 1)
 
     # flow pairs
-    if 'latent' in FLAGS.dataset_name:
-        x0 = images[..., :images.shape[-1] // 2]
-        x1 = images[..., images.shape[-1] // 2:]
-    else:
-        x1 = images
-        x0 = torch.randn_like(images, generator=gen)
+    x1 = images
+    x0 = torch.randn(images.shape, dtype=images.dtype, device=images.device, generator=gen)
+
     x_t = (1.0 - (1.0 - 1e-5) * t_full) * x0 + t_full * x1
     v_t = x1 - (1.0 - 1e-5) * x0
 
-    dt_flow = int(math.log2(FLAGS.model['denoise_timesteps']))
+    dt_flow = int(math.log2(cfg.model_cfg.denoise_timesteps))
     dt_base = torch.full((B,), dt_flow, device=device, dtype=torch.float32)
 
     return x_t, v_t, t, dt_base, labels_dropped, info
