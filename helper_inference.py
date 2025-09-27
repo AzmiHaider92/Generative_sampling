@@ -1,41 +1,56 @@
 # helper_inference_torch.py
 import os
+
+import torchvision.utils as vutils
+import wandb
 import numpy as np
 import torch
 import tqdm
+from torchmetrics.image import FrechetInceptionDistance
+
 
 @torch.no_grad()
 def do_inference(
     cfg,
     model,                    # torch.nn.Module (maybe DDP-wrapped)
     ema_model,                # torch.nn.Module or None
-    step,                     # int or None
     dataset_iter,
-    dataset_valid_iter,
     vae_encode=None,
     vae_decode=None,
-    get_fid_activations=None,
-    imagenet_labels=None,
-    visualize_labels=None,
-    fid_from_stats=None,
-    truth_fid_stats=None,
 ):
     device = next(model.parameters()).device
     model.eval()
     if ema_model is not None:
         ema_model.eval()
 
+    # for fid calc
+    fid = None
+    if cfg.runtime_cfg.fid_stats is not None:
+        # Metric on GPU; disable AMP for numerical stability
+        fid = FrechetInceptionDistance(
+            feature=2048,
+            normalize=True,  # inputs must be [0,1]
+            input_img_size=(3, 299, 299),
+            antialias=True,
+        ).to(device)
+
+        # Load REAL stats (only the real_* buffers)
+        d = torch.load(cfg.runtime_cfg.fid_stats, map_location=device)
+        with torch.no_grad():
+            fid.real_features_sum.copy_(d["real_features_sum"].to(device))
+            fid.real_features_cov_sum.copy_(d["real_features_cov_sum"].to(device))
+            fid.real_features_num_samples.copy_(d["real_features_num_samples"].to(device))
+
     # Pull one batch for shape; JAX also takes shapes from current dataset. :contentReference[oaicite:10]{index=10}
     batch_images, batch_labels = next(dataset_iter)
-    valid_images, valid_labels = next(dataset_valid_iter)
     if cfg.model_cfg.use_stable_vae and vae_encode is not None:
         batch_images = vae_encode(batch_images)
-        valid_images = vae_encode(valid_images)
 
     images_shape = batch_images.shape
     denoise_timesteps = cfg.runtime_cfg.inference_timesteps
     num_generations = cfg.runtime_cfg.inference_generations
     cfg_scale = cfg.runtime_cfg.inference_cfg_scale
+    nimgs_2_vis, imgs_2_vis = 0, []
 
     print(f"Sampling cfg={cfg_scale} with T={denoise_timesteps} for {num_generations} images")  # :contentReference[oaicite:11]{index=11}
 
@@ -87,39 +102,49 @@ def do_inference(
                 x = x1pred * (t + delta_t) + eps * (1.0 - t - delta_t)
             else:
                 # Euler update
-                x = x + v * delta_t  # :contentReference[oaicite:17]{index=17}
+                x = x + v * delta_t
 
-        all_x1.append(x.detach().cpu().numpy())
+        x1 = x.clone()
+        if cfg.model_cfg.use_stable_vae and vae_decode is not None:
+            # Decode last chunk just to verify pipeline
+            x1 = x1.detach()
+            x_vis = vae_decode(torch.tensor(x1, device=device))
+            x_vis = (x_vis + 1.0) * 0.5
+            x_vis = x_vis.clamp(0.0, 1.0)
+            x1 = x_vis.permute(0, 3, 1, 2)
+
+        all_x1.append(x1.detach().cpu().numpy())
         all_labels.append(labels.detach().cpu().numpy())
 
-        # optional on-the-fly rendering for small N: decode and stash
-        # (Your JAX version conditionally saved render arrays) :contentReference[oaicite:18]{index=18}
+        if nimgs_2_vis < 8: # visualize just 8, hardcoded
+            imgs_2_vis.append(x1)
+            nimgs_2_vis += x1.shape[0]
 
-    # Optionally decode to image space
-    # NOTE: generation x is in latent/image space depending on training; if VAE used, decode to [-1,1]
-    if cfg.model_cfg.use_stable_vae and vae_decode is not None:
-        # Decode last chunk just to verify pipeline
-        x_vis = vae_decode(torch.tensor(all_x1[-1], device=device))
-        x_vis = (x_vis * 0.5 + 0.5).clamp(0, 1)
+        if fid is not None:
+            # update FAKE side
+            fid.update(x1, real=False)
 
     # Optional FID computation against provided stats (approximate, subset)
-    if get_fid_activations and truth_fid_stats is not None:
-        # Collect a reasonable subset to keep memory sane
-        subset = min(8192, len(all_x1) * B)
-        xs = torch.tensor(np.concatenate(all_x1, axis=0)[:subset], device=device)
-        if cfg.model_cfg.use_stable_vae and vae_decode is not None:
-            xs = vae_decode(xs)
-        xs = (xs * 0.5 + 0.5).clamp(0, 1)
-        acts = []
-        for i in range(0, xs.shape[0], 64):
-            acts.append(get_fid_activations(xs[i:i+64]).cpu())
-        acts = torch.cat(acts, dim=0).numpy()
-        mu, sigma = acts.mean(0), np.cov(acts, rowvar=False)
-        fid = fid_from_stats(mu, sigma, truth_fid_stats['mu'], truth_fid_stats['sigma'])
-        print(f"[inference] FID (subset): {fid:.2f}")
+    if fid is not None:
+        # Compute FID
+        with torch.cuda.amp.autocast(enabled=False):
+            score = fid.compute().item()
+        print(f"FID = {score:.4f}  (N={num_generations})")
 
+    imgs = torch.cat(imgs_2_vis, dim=0)  #
+    imgs = imgs[:8] # visualize just 8, hardcoded
+
+    grid = vutils.make_grid(
+        imgs, nrow=4, padding=2,
+        normalize=True, value_range=(-1, 1)  # set normalize=False if already in [0,1]
+    )
+    wandb.log({"Generated samples": wandb.Image(grid)})
     # Optionally save raw arrays for later analysis
     if cfg.runtime_cfg.save_dir is not None:
         np.save(os.path.join(cfg.runtime_cfg.save_dir, "x0.npy"), np.concatenate(all_x0, axis=0))
         np.save(os.path.join(cfg.runtime_cfg.save_dir, "x1.npy"), np.concatenate(all_x1, axis=0))
         np.save(os.path.join(cfg.runtime_cfg.save_dir, "labels.npy"), np.concatenate(all_labels, axis=0))
+
+    model.train()
+    if ema_model is not None:
+        ema_model.train()

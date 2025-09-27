@@ -117,7 +117,7 @@ def main():
     if (not is_ddp) or rank == 0:
         # timestamped run name
         ts = datetime.now().strftime("M%m-D%d-H%H_M%M")
-        base_name = wandb_cfg.name.format(model_name=model_cfg.train_type, dataset_name=runtime_cfg.dataset_name)
+        base_name = wandb_cfg.name.format(train_type=model_cfg.train_type, dataset_name=runtime_cfg.dataset_name)
         run_name = f"{base_name}_{ts}"
         runtime_cfg.save_dir = os.path.join(runtime_cfg.save_dir, run_name)
         os.makedirs(runtime_cfg.save_dir, exist_ok=True)
@@ -164,18 +164,6 @@ def main():
     # one pass to know channels
     example_images = maybe_encode(example_images)
     H, C = example_images.shape[1], example_images.shape[-1]
-
-    # If we're in latent dataset mode, split channels like JAX
-    #if 'latent' in runtime_cfg.dataset_name:
-    #    example_images = example_images[..., example_images.shape[-1] // 2:]
-
-    # ----- FID -----
-    if runtime_cfg.fid_stats is not None:
-        get_fid_acts = get_fid_network(device=device)
-        truth_fid_stats = np.load(runtime_cfg.fid_stats)
-    else:
-        get_fid_acts = None
-        truth_fid_stats = None
 
     # ----- model -----
     dit = DiT(
@@ -249,7 +237,7 @@ def main():
     # ----- targets dispatcher -----
     def import_targets(train_type: str):
         name = {
-            "naive": "targets_naive",
+            "naive": "baselines.targets_naive",
             "shortcut": "targets_shortcut",
             "progressive": "targets_progressive",
             "consistency-distillation": "targets_consistency_distillation",
@@ -300,18 +288,11 @@ def main():
                      dataset_valid_iter=dataset_valid,
                      vae_encode=vae_encode_bhwc,
                      vae_decode=vae_decode_bhwc,
-                     get_fid_activations=get_fid_acts,
-                     imagenet_labels=open('data/imagenet_labels.txt').read().splitlines() if os.path.exists('data/imagenet_labels.txt') else None,
-                     visualize_labels=None,
-                     fid_from_stats=fid_from_stats,
-                     truth_fid_stats=truth_fid_stats)
+                     )
         return
 
     # ----- training loop -----
     gen = torch.Generator(device=device).manual_seed(runtime_cfg.seed)
-
-
-
 
     ################################################################################################################
     #  _             _
@@ -353,7 +334,7 @@ def main():
 
         # targets per train_type
         if model_cfg.train_type == 'naive':
-            x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
+            x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels)
         elif model_cfg.train_type == 'shortcut':
             x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
         elif model_cfg.train_type == 'progressive':
@@ -440,27 +421,20 @@ def main():
                 teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
 
         # eval
-        if (step % runtime_cfg.eval_interval) == 0:
+        if (step % runtime_cfg.eval_interval) == 0 and rank == 0:
             print("================= evaluating =================")
-            eval_model(cfg,
-                       dit.module if is_ddp else dit,
-                       (dit.module if is_ddp else dit) if ema_model is None else None,  # pass a real ema_model if you keep a separate module
-                       step=step,
-                       dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True, runtime_cfg.debug_overfit),
-                       dataset_valid_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit),
-                       vae_encode=vae_encode_bhwc,
-                       vae_decode=vae_decode_bhwc,
-                       update_fn=lambda imgs, lbls, force_t=-1, force_dt=-1: {
-                           "loss": float(loss.detach().cpu())
-                       },  # lightweight placeholder; you can wire a true eval step if desired
-                       get_fid_activations=get_fid_acts,
-                       imagenet_labels=open(os.path.join(runtime_cfg.dataset_root_dir, "label.labels.txt")).read().splitlines() if os.path.exists(os.path.join(runtime_cfg.dataset_root_dir, "label.labels.txt")) else None,
-                       visualize_labels=None,
-                       fid_from_stats=fid_from_stats,
-                       truth_fid_stats=truth_fid_stats)
+            if (not is_ddp) or rank == 0:
+                do_inference(cfg,
+                             dit.module if is_ddp else dit,
+                             (dit.module if is_ddp else dit) if ema_model is None else None,
+                             # pass a real ema_model if you keep a separate module
+                             dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
+                                                           per_rank_bs, True, runtime_cfg.debug_overfit),
+                             vae_encode=vae_encode_bhwc,
+                             vae_decode=vae_decode_bhwc)
 
         # save
-        if (step % runtime_cfg.save_interval) == 0 and runtime_cfg.save_dir:
+        if (step % runtime_cfg.save_interval) == 0 and runtime_cfg.save_dir and rank == 0:
             print("================= saving a checkpoint =================")
             if (not is_ddp) or rank == 0:
                 os.makedirs(runtime_cfg.save_dir, exist_ok=True)
