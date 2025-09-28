@@ -14,13 +14,13 @@ try:
 except Exception:
     _create_index = None
 
+# --- put this at top-level (module scope), NOT inside another function ---
+class CenterCropSquareThenResize:
+    def __init__(self, target: int):
+        self.target = int(target)
 
-def _build_transform(is_train: bool):
-    # pick output size
-    target = 256
-
-    # crop to square of min(H,W), then resize -> (target, target)
-    def center_crop_square_then_resize(img):
+    def __call__(self, img):
+        target = self.target
         # Works for PIL.Image or torch.Tensor
         if isinstance(img, torch.Tensor):
             # Tensor could be CHW or HWC
@@ -49,13 +49,14 @@ def _build_transform(is_train: bool):
             img = TF.resize(img, (target, target), interpolation=IM.BICUBIC, antialias=True)
             return img
 
-    tfms = [T.Lambda(center_crop_square_then_resize)]
+
+def _build_transform(is_train: bool, target: int):
+    tfms = [CenterCropSquareThenResize(target)]
     if is_train:
         tfms.append(T.RandomHorizontalFlip())
     tfms += [
-        T.ToTensor(),                       # [0,1]
-        T.Normalize([0.5, 0.5, 0.5],        # -> [-1,1]
-                    [0.5, 0.5, 0.5]),
+        T.ToTensor(),
+        T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
     ]
     return T.Compose(tfms)
 
@@ -150,7 +151,7 @@ class ImageNetTFRecord(IterableDataset):
         # use your schema
         self.img_key, self.label_key = _IMG_KEY, _LABEL_KEY
         self.desc    = _build_desc(self.img_key, self.label_key)
-        self.tfm     = _build_transform(train)
+        self.tfm     = _build_transform(train, image_size)
         # optional length estimate if you want
         self._size_rank = sum(_index_count(idx) for idx in self.indexes[self.rank::self.world])
 
