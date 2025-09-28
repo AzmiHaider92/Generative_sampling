@@ -95,7 +95,12 @@ def _ensure_index(tfr_path: str, index_root: str) -> str:
     os.makedirs(index_root, exist_ok=True)
     idx_path = os.path.join(index_root, os.path.basename(tfr_path) + ".index")
     if not os.path.isfile(idx_path):
-        _create_index(tfr_path, idx_path)   # do on rank 0 only in multi-GPU
+        if _create_index is None:
+            raise RuntimeError(
+                "tfrecord2idx is not available. Install the extras: "
+                "pip install tfrecord"
+            )
+        _create_index(tfr_path, idx_path)
     return idx_path
 
 
@@ -137,6 +142,7 @@ def _build_desc(img_key=_IMG_KEY, label_key=_LABEL_KEY):
 class ImageNetTFRecord(IterableDataset):
     def __init__(self, ds_root: str, train: bool, world: int, rank: int, image_size: int = 256):
         self.world, self.rank = max(1, world), rank
+        self.train = train
         split = "train" if train else "validation"
         self.shards  = _find_shards(ds_root, split)
         index_root = r'./data/imagenet_index_dir'
@@ -164,20 +170,36 @@ class ImageNetTFRecord(IterableDataset):
     def __iter__(self):
         shards_w, idxs_w = self._split_for_worker()
         if not shards_w:
-            return
-        for data_p, idx_p in zip(shards_w, idxs_w):
-            ds = TFRecordDataset(data_p, idx_p, self.desc, transform=_identity, shuffle_queue_size=0)
-            for sample in ds:
-                img_bytes = sample[self.img_key]   # <-- 'image'
-                with Image.open(io.BytesIO(img_bytes)) as im:
-                    im = im.convert("RGB")
-                x_chw = self.tfm(im).contiguous()
+            return iter(())   # cleanly yield nothing
 
-                label = int(sample[self.label_key])   # <-- 'label'
-                # only subtract 1 if your labels are 1..1000; otherwise keep as-is
-                # if 1 <= label <= 1000: label -= 1
+        # (turn the rest into a generator)
+        def _gen():
+            # optional: randomize shard order per epoch/worker
+            local = list(zip(shards_w, idxs_w))
+            random.shuffle(local)
+            for data_p, idx_p in local:
+                ds = TFRecordDataset(
+                    data_p, idx_p, self.desc,
+                    transform=_identity,
+                    # enable internal shuffle to avoid huge queues but get some mixing
+                    shuffle_queue_size=2048 if self.train else 0,
+                )
+                for sample in ds:
+                    try:
+                        img_bytes = sample[self.img_key]
+                        with Image.open(io.BytesIO(img_bytes)) as im:
+                            im = im.convert("RGB")
+                        x_chw = self.tfm(im).contiguous()
+                        label = int(sample[self.label_key])
 
-                yield x_chw, torch.tensor(label, dtype=torch.long)
+                        # If your TFRecords are 1..1000, uncomment the next line:
+                        # label -= 1
+
+                        yield x_chw, torch.tensor(label, dtype=torch.long)
+                    except (OSError, Image.DecompressionBombError, ValueError) as e:
+                        # Skip bad/corrupted sample instead of killing the worker
+                        continue
+        return _gen()
 
 
 def get_imagenet_tfrecord_iter(ds_root, per_rank_bs, train, world, rank, image_size=256, debug_overfit=0):
@@ -189,22 +211,25 @@ def get_imagenet_tfrecord_iter(ds_root, per_rank_bs, train, world, rank, image_s
     loader = DataLoader(
         ds,
         batch_size=per_rank_bs,
-        shuffle=False,                 # IterableDataset: do shuffling inside if needed
+        shuffle=False,
         num_workers=num_workers,
-        pin_memory=False,
-        persistent_workers=False,
-        prefetch_factor=None,
+        pin_memory=(torch.cuda.is_available() and num_workers > 0),
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=(2 if num_workers > 0 else None),
         drop_last=True,
         worker_init_fn=_seed_worker if num_workers > 0 else None,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     def _iter():
-        epoch = 0
         while True:
+            # Optional: reshuffle shard order each epoch is already done in __iter__
             for x_chw, y in loader:
-                yield x_chw.to(device, non_blocking=False).permute(0,2,3,1).contiguous(), y.to(device, non_blocking=False)
-            epoch +=1
+                # If your model expects BHWC, convert here
+                x_bhwc = x_chw.to(device, non_blocking=num_workers > 0).permute(0,2,3,1).contiguous()
+                y = y.to(device, non_blocking=num_workers > 0)
+                yield x_bhwc, y
     return _iter()
 
 

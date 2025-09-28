@@ -1,17 +1,13 @@
-# train_torch.py
-import os, math
+import math
 from dataclasses import asdict
 from datetime import datetime
 import copy
-import itertools
 import numpy as np
-import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.amp import autocast, GradScaler
 import wandb
 from tqdm import tqdm
-
 from arguments_parser import RuntimeCfg, ModelCfg, WandbCfg, load_configs_from_file, parse_args, CFG
 from model import DiT
 import importlib
@@ -19,13 +15,19 @@ import time
 from utils.datasets import get_dataset as get_dataset_iter
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from utils.sharding import ddp_setup
-from utils.fid import get_fid_network, fid_from_stats
 from utils.stable_vae import StableVAE
-
-from helper_eval import eval_model
 from helper_inference import do_inference
 import torch.multiprocessing as mp
 mp.set_sharing_strategy("file_system")
+# At the very top of train.py (before DataLoaders are created)
+import torch, multiprocessing as mp, os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
+try:
+    if torch.multiprocessing.get_start_method(allow_none=True) != "spawn":
+        torch.multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass  # already set
 
 
 # ---------------- Utils ----------------
