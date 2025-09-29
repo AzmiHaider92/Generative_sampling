@@ -26,25 +26,17 @@ class RuntimeCfg:
 
 @dataclass
 class ModelCfg:
+    model_id: str = "DiT-L/2"
     lr: float = 1e-4
-    beta1: float = 0.9
-    beta2: float = 0.999
-    weight_decay: float = 0.0
+    dropout: float = 0.0
+    mlp_ratio: float = 1.0
+    class_dropout_prob: float = 0.1
+    denoise_timesteps: int = 250
+    cfg_scale: float = 1.5
     use_cosine: int = 0
     warmup: int = 0
-    dropout: float = 0.0
-    hidden_size: int = 64
-    patch_size: int = 8
-    depth: int = 2
-    num_heads: int = 2
-    mlp_ratio: int = 1
-    class_dropout_prob: float = 0.1
-    denoise_timesteps: int = 128
-    cfg_scale: float = 4.0
-    target_update_rate: float = 0.999
     use_ema: int = 0
     use_stable_vae: int = 1
-    sharding: str = "dp"  # kept for parity; we use DDP
     t_sampling: str = "discrete-dt"
     dt_sampling: str = "uniform"
     bootstrap_cfg: int = 0
