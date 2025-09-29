@@ -8,8 +8,10 @@ import torch.distributed as dist
 from torch.amp import autocast, GradScaler
 import wandb
 from tqdm import tqdm
+
+from DiT.model import DiT
+from DiT.model_config import get_dit_params
 from arguments_parser import RuntimeCfg, ModelCfg, WandbCfg, load_configs_from_file, parse_args, CFG
-from model import DiT
 import importlib
 import time
 from utils.datasets import get_dataset as get_dataset_iter
@@ -20,7 +22,9 @@ from helper_inference import do_inference
 import torch.multiprocessing as mp
 mp.set_sharing_strategy("file_system")
 # At the very top of train.py (before DataLoaders are created)
-import torch, multiprocessing as mp, os
+import torch, os
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
 try:
@@ -168,18 +172,16 @@ def main():
     H, C = example_images.shape[1], example_images.shape[-1]
 
     # ----- model -----
+    params = get_dit_params(model_id=model_cfg.model_id)
     dit = DiT(
+        **params,
         in_channels=C,
-        patch_size=model_cfg.patch_size,
-        hidden_size=model_cfg.hidden_size,
-        depth=model_cfg.depth,
-        num_heads=model_cfg.num_heads,
-        mlp_ratio=model_cfg.mlp_ratio,
         out_channels=C,
         class_dropout_prob=model_cfg.class_dropout_prob,
         num_classes=runtime_cfg.num_classes,
         dropout=model_cfg.dropout,
-        ignore_dt=False if (model_cfg.train_type in ("shortcut","livereflow")) else True,
+        mlp_ratio=model_cfg.mlp_ratio,
+        ignore_dt=(model_cfg.train_type not in ("shortcut", "livereflow")),
         image_size=H,
     ).to(device)
 
@@ -212,9 +214,7 @@ def main():
     lr_sched = (WarmupCosine(base_lr, model_cfg.warmup, runtime_cfg.max_steps)
                 if model_cfg.use_cosine else
                 (LinearWarmup(base_lr, model_cfg.warmup) if model_cfg.warmup > 0 else (lambda s: base_lr)))
-    opt = torch.optim.AdamW(param_groups(dit, model_cfg.weight_decay),
-                            lr=base_lr, betas=(model_cfg.beta1, model_cfg.beta2),
-                            eps=1e-8, fused=True)
+    opt = torch.optim.AdamW(param_groups(dit, wd=0.0), lr=base_lr, betas=(0.9, 0.999),)
 
     amp_dtype = torch.bfloat16  # or torch.float16
     scaler = GradScaler('cuda', enabled=(amp_dtype is torch.float16))
@@ -280,17 +280,15 @@ def main():
     # ----- eval/infer early exit -----
     if runtime_cfg.mode != "train":
         # build dataset iters again (not consumed)
-        dataset = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True, runtime_cfg.debug_overfit)
-        dataset_valid = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit)
-
-        do_inference(cfg, dit.module if is_ddp else dit,
-                     (dit.module if is_ddp else dit),  # use same as ema for now
-                     step=global_step,
-                     dataset_iter=dataset,
-                     dataset_valid_iter=dataset_valid,
+        do_inference(cfg,
+                     dit.module if is_ddp else dit,
+                     (dit.module if is_ddp else dit) if ema_model is None else None,
+                     # pass a real ema_model if you keep a separate module
+                     dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
+                                                   per_rank_bs, True, runtime_cfg.debug_overfit),
                      vae_encode=vae_encode_bhwc,
                      vae_decode=vae_decode_bhwc,
-                     )
+                     step=global_step)
         return
 
     # ----- training loop -----
@@ -317,7 +315,7 @@ def main():
     ema_t = None
     EMA_EVERY = 10
     EMA_DECAY = 0.9999
-    step, max_steps = 1, runtime_cfg.max_steps + 1  # e.g., 8001
+    step, max_steps = global_step+1, runtime_cfg.max_steps + 1  # e.g., 8001
 
     while step < max_steps:
         t0 = time.time()
@@ -349,15 +347,18 @@ def main():
         opt.zero_grad(set_to_none=True)
         with autocast('cuda', dtype=amp_dtype):
             v_pred, _, _ = (dit)(x_t, t_vec, dt_base, labels_eff, train=True, return_activations=False)
-            mse = ((v_pred - v_t) ** 2).mean(dim=(1, 2, 3))
+            mse = (v_pred - v_t).float().pow(2).mean(dim=(1, 2, 3))
             loss = mse.mean()
 
-        if scaler.is_enabled():  # FP16 path
+        if scaler.is_enabled():
             scaler.scale(loss).backward()
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0)
             scaler.step(opt)
             scaler.update()
-        else:  # BF16 / full-precision path
+        else:
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0)
             opt.step()
 
         # EMA update
@@ -365,7 +366,7 @@ def main():
             ema_model.update(dit.module if is_ddp else dit, decay=EMA_DECAY ** EMA_EVERY)
 
         # log (every log_interval)
-        if ((step % runtime_cfg.log_interval) == 0):
+        if (step % runtime_cfg.log_interval) == 0:
             # cheap scalars on every rank, averaged like JAX
             train_loss_mean = ddp_mean_scalar(float(loss.detach().cpu()), device)
             vmag_mean = ddp_mean_scalar(float(v_pred.square().mean().sqrt().detach().cpu()), device)
@@ -424,7 +425,8 @@ def main():
                              dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                            per_rank_bs, True, runtime_cfg.debug_overfit),
                              vae_encode=vae_encode_bhwc,
-                             vae_decode=vae_decode_bhwc)
+                             vae_decode=vae_decode_bhwc,
+                             step=step)
 
         # save
         if (step % runtime_cfg.save_interval) == 0 and runtime_cfg.save_dir and rank == 0:
