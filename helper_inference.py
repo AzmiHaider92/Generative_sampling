@@ -1,13 +1,13 @@
-# helper_inference_torch.py
-import os
-
+from torchvision.utils import save_image
 import torchvision.utils as vutils
 import wandb
 import numpy as np
 import torch
 import tqdm
 from torchmetrics.image import FrechetInceptionDistance
-
+import os
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 @torch.no_grad()
 def do_inference(
@@ -19,6 +19,7 @@ def do_inference(
     vae_decode=None,
     num_generations=8,
     calc_fid=False,
+    step=0
 ):
     device = next(model.parameters()).device
     was_training = model.training
@@ -108,11 +109,12 @@ def do_inference(
                 # Euler update
                 x = x + v * delta_t
 
-        x1 = x.clone()
+        x1 = x.detach().clone()
         if cfg.model_cfg.use_stable_vae and vae_decode is not None:
             # Decode last chunk just to verify pipeline
-            x1 = x1.detach()
-            x_vis = vae_decode(torch.tensor(x1, device=device))
+            x1 = x1.to(device, non_blocking=True)
+            with torch.inference_mode(), torch.amp.autocast('cuda', torch.float16):
+                x_vis = vae_decode(x1)
             x_vis = (x_vis + 1.0) * 0.5
             x_vis = x_vis.clamp(0.0, 1.0)
             x1 = x_vis.permute(0, 3, 1, 2)
@@ -139,6 +141,7 @@ def do_inference(
     imgs = imgs[:8]
 
     grid = vutils.make_grid(imgs, nrow=4, padding=2, normalize=False)
+    save_image(grid, os.path.join(cfg.runtime_cfg.save_dir, f"generated_img_step{step}.png"))
     wandb.log({"Generated samples": wandb.Image(grid)})
     # Optionally save raw arrays for later analysis
     #if cfg.runtime_cfg.save_dir is not None:
@@ -156,3 +159,4 @@ def do_inference(
             ema_model.train()
         else:
             ema_model.eval()
+
