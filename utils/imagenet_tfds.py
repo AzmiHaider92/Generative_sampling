@@ -56,7 +56,7 @@ def _build_transform(is_train: bool, target: int):
         tfms.append(T.RandomHorizontalFlip())
     tfms += [
         T.ToTensor(),
-        T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+        T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5], inplace=True),
     ]
     return T.Compose(tfms)
 
@@ -228,9 +228,9 @@ def get_imagenet_tfrecord_iter(ds_root, per_rank_bs, train, world, rank, image_s
             # Optional: reshuffle shard order each epoch is already done in __iter__
             for x_chw, y in loader:
                 # If your model expects BHWC, convert here
-                x_bhwc = x_chw.to(device, non_blocking=num_workers > 0).permute(0,2,3,1).contiguous()
+                x_bchw = x_chw.to(device, non_blocking=num_workers > 0) #.permute(0,2,3,1).contiguous()
                 y = y.to(device, non_blocking=num_workers > 0)
-                yield x_bhwc, y
+                yield x_bchw, y
     return _iter()
 
 

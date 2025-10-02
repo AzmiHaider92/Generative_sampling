@@ -27,18 +27,16 @@ def get_targets(cfg, gen, images, labels):
     #              with probability p=class_dropout_prob, label = num_classes (the null label);
     #              else label = original class id.
 
-    info = {}
     B = images.shape[0]
     device = images.device
 
     # label dropout for CFG
     mask = torch.bernoulli(torch.full((B,), cfg.model_cfg.class_dropout_prob, device=device)).bool()
     labels_dropped = torch.where(mask, torch.full_like(labels, cfg.runtime_cfg.num_classes), labels)
-    info['dropped_ratio'] = (labels_dropped == cfg.runtime_cfg.num_classes).float().mean()
 
     # t in [0,1]
-    t = torch.randint(0, cfg.model_cfg.denoise_timesteps, (B,), generator=gen, device=device).float()
-    t = t / float(cfg.model_cfg.denoise_timesteps)
+    t = torch.randint(0, cfg.model_cfg.denoise_timesteps, (B,), generator=gen, device=device)
+    #t = t / float(cfg.model_cfg.denoise_timesteps)
     t_full = t.view(B, 1, 1, 1)
 
     # flow pairs
@@ -51,4 +49,4 @@ def get_targets(cfg, gen, images, labels):
     dt_flow = int(math.log2(cfg.model_cfg.denoise_timesteps))
     dt_base = torch.full((B,), dt_flow, device=device, dtype=torch.float32)
 
-    return x_t, v_t, t, dt_base, labels_dropped, info
+    return x_t, v_t, t, dt_base, labels_dropped, None

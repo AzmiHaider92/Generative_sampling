@@ -9,7 +9,7 @@ from torch.amp import autocast, GradScaler
 import wandb
 from tqdm import tqdm
 
-from DiT.model import DiT
+from DiT.meta_model import DiT
 from DiT.model_config import get_dit_params
 from arguments_parser import RuntimeCfg, ModelCfg, WandbCfg, load_configs_from_file, parse_args, CFG
 import importlib
@@ -149,37 +149,34 @@ def main():
 
         # helpers to keep BHWC IO for the model
         @torch.no_grad()
-        def vae_encode_bhwc(x_bhwc: torch.Tensor) -> torch.Tensor:
+        def vae_encode_bchw(x_bchw: torch.Tensor) -> torch.Tensor:
             # returns BHWC latents
-            z_bchw = vae.encode(x_bhwc)                 # BCHW (latents)
-            return z_bchw.permute(0, 2, 3, 1).contiguous()
+            z_bchw = vae.encode(x_bchw)                 # BCHW (latents)
+            return z_bchw
 
         @torch.no_grad()
-        def vae_decode_bhwc(lat_bhwc: torch.Tensor) -> torch.Tensor:
-            z_bchw = lat_bhwc.permute(0, 3, 1, 2).contiguous()
-            x = vae.decode(z_bchw)                      # BHWC in [-1,1]
+        def vae_decode_bchw(lat_bchw: torch.Tensor) -> torch.Tensor:
+            x = vae.decode(lat_bchw)                      # BCHW in [-1,1] ??
             return x
     else:
-        vae_encode_bhwc = vae_decode_bhwc = None
+        vae_encode_bchw = vae_decode_bchw = None
 
-    def maybe_encode(x_bhwc):
-        if model_cfg.use_stable_vae and vae_encode_bhwc is not None and 'latent' not in runtime_cfg.dataset_name:
-            return vae_encode_bhwc(x_bhwc)
-        return x_bhwc
+    def maybe_encode(x_bchw):
+        if model_cfg.use_stable_vae and vae_encode_bchw is not None and 'latent' not in runtime_cfg.dataset_name:
+            return vae_encode_bchw(x_bchw)
+        return x_bchw
 
     # one pass to know channels
     example_images = maybe_encode(example_images)
-    H, C = example_images.shape[1], example_images.shape[-1]
+    C, H = example_images.shape[1], example_images.shape[-1]
 
     # ----- model -----
     params = get_dit_params(model_id=model_cfg.model_id)
     dit = DiT(
         **params,
         in_channels=C,
-        out_channels=C,
         class_dropout_prob=model_cfg.class_dropout_prob,
         num_classes=runtime_cfg.num_classes,
-        dropout=model_cfg.dropout,
         mlp_ratio=model_cfg.mlp_ratio,
         ignore_dt=(model_cfg.train_type not in ("shortcut", "livereflow")),
         image_size=H,
@@ -216,8 +213,8 @@ def main():
                 (LinearWarmup(base_lr, model_cfg.warmup) if model_cfg.warmup > 0 else (lambda s: base_lr)))
     opt = torch.optim.AdamW(param_groups(dit, wd=0.0), lr=base_lr, betas=(0.9, 0.999),)
 
-    amp_dtype = torch.bfloat16  # or torch.float16
-    scaler = GradScaler('cuda', enabled=(amp_dtype is torch.float16))
+    amp_dtype = torch.bfloat16  # match original-style BF16
+    #    scaler = GradScaler('cuda', enabled=(amp_dtype is torch.float16))
 
     # ----- checkpoint load -----
     global_step = 0
@@ -286,8 +283,8 @@ def main():
                      # pass a real ema_model if you keep a separate module
                      dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                    per_rank_bs, True, runtime_cfg.debug_overfit),
-                     vae_encode=vae_encode_bhwc,
-                     vae_decode=vae_decode_bhwc,
+                     vae_encode=vae_encode_bchw,
+                     vae_decode=vae_decode_bchw,
                      step=global_step)
         return
 
@@ -339,27 +336,16 @@ def main():
         else:
             raise ValueError(f"Unknown train_type: {model_cfg.train_type}")
 
-        # unconditional path if cfg_scale == 0 (match JAX)
-        if model_cfg.cfg_scale == 0:
-            labels_eff = torch.full_like(labels_eff, runtime_cfg.num_classes)
-
         # forward + loss
         opt.zero_grad(set_to_none=True)
         with autocast('cuda', dtype=amp_dtype):
-            v_pred, _, _ = (dit)(x_t, t_vec, dt_base, labels_eff, train=True, return_activations=False)
+            v_pred = (dit)(x_t, t_vec, dt_base, labels_eff, train=True, return_activations=False)
             mse = (v_pred - v_t).float().pow(2).mean(dim=(1, 2, 3))
             loss = mse.mean()
 
-        if scaler.is_enabled():
-            scaler.scale(loss).backward()
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0)
-            scaler.step(opt)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0)
-            opt.step()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0)
+        opt.step()
 
         # EMA update
         if model_cfg.use_ema and ema_model is not None and (step % EMA_EVERY == 0):
@@ -395,7 +381,7 @@ def main():
                         v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_student_ema, vimg,
                                                                             vlbl)
 
-                    v_pred2, _, _ = dit(v_x_t, v_t_vec, v_dt, v_lbl, train=False, return_activations=False)
+                    v_pred2 = dit(v_x_t, v_t_vec, v_dt, v_lbl, train=False, return_activations=False)
                     v_loss = ((v_pred2 - v_v_t).pow(2).mean(dim=(1, 2, 3))).mean().item()
 
                 wandb.log({
@@ -424,8 +410,8 @@ def main():
                              # pass a real ema_model if you keep a separate module
                              dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                            per_rank_bs, True, runtime_cfg.debug_overfit),
-                             vae_encode=vae_encode_bhwc,
-                             vae_decode=vae_decode_bhwc,
+                             vae_encode=vae_encode_bchw,
+                             vae_decode=vae_decode_bchw,
                              step=step)
 
         # save
@@ -453,8 +439,8 @@ def main():
                  # pass a real ema_model if you keep a separate module
                  dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                per_rank_bs, True, runtime_cfg.debug_overfit),
-                 vae_encode=vae_encode_bhwc,
-                 vae_decode=vae_decode_bhwc,
+                 vae_encode=vae_encode_bchw,
+                 vae_decode=vae_decode_bchw,
                  num_generations=50000,
                  calc_fid=True)
 

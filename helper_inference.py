@@ -67,7 +67,7 @@ def do_inference(
     def call_model(x, t_vector, dt_base, labels, use_ema=True):
         m = ema_model if (use_ema and getattr(cfg.model_cfg, "use_ema", 0)) else model
         # model forward expects BHWC and returns v_pred (BHWC)
-        v_pred, _, _ = m(x, t_vector, dt_base, labels, train=False, return_activations=True)
+        v_pred = m(x, t_vector, dt_base, labels, train=False, return_activations=True)
         return v_pred
 
     # Choose dt_base per JAX logic: smallest dt for naive; otherwise from inference T. :contentReference[oaicite:13]{index=13}
@@ -116,8 +116,8 @@ def do_inference(
             with torch.inference_mode(), torch.amp.autocast('cuda', torch.float16):
                 x_vis = vae_decode(x1)
             x_vis = (x_vis + 1.0) * 0.5
-            x_vis = x_vis.clamp(0.0, 1.0)
-            x1 = x_vis.permute(0, 3, 1, 2)
+            x1 = x_vis.clamp(0.0, 1.0)
+            #x1 = x_vis.permute(0, 3, 1, 2)
 
         #all_x1.append(x1.detach().cpu().numpy())
         #all_labels.append(labels.detach().cpu().numpy())
