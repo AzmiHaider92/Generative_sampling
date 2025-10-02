@@ -2,6 +2,7 @@
 *.sh
 *.out
 *.err
+backup/
 log/
 data/
 configs/
