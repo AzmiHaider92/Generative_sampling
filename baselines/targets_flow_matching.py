@@ -36,7 +36,7 @@ def get_targets(cfg, gen, images, labels):
 
     # t in [0,1]
     t = torch.randint(0, cfg.model_cfg.denoise_timesteps, (B,), generator=gen, device=device)
-    #t = t / float(cfg.model_cfg.denoise_timesteps)
+    t = t / float(cfg.model_cfg.denoise_timesteps)
     t_full = t.view(B, 1, 1, 1)
 
     # flow pairs
