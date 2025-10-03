@@ -9,6 +9,7 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 from torchvision.datasets.utils import download_url
 
+from utils.celeba_hq import _get_celeba_iter
 from utils.imagenet_tfds import _get_imagenet_iter
 
 
@@ -109,6 +110,7 @@ def _prepare_tiny_imagenet(root_dir: str):
             pass
     return tgt
 
+
 # ----------------- dataset builders -----------------
 def _make_imagefolder_loader(root: str, split: str, batch_size: int,
                              world: int, rank: int, image_size=256, debug_overfit=0) -> DataLoader:
@@ -162,60 +164,22 @@ def _get_tiny_imagenet_iter(root: str, per_rank_bs: int, train: bool, debug_over
             yield x_chw.permute(0, 2, 3, 1).contiguous(), y  # BHWC
     return _iter()
 
-def _get_cifar100_iter(root: str, batch_size: int, train: bool, debug_overfit: int) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
-    world = int(os.environ.get("WORLD_SIZE", "1"))
-    rank = int(os.environ.get("RANK", "0"))
-    per_rank_bs = max(1, batch_size // world)
-
-    tfm = transforms.Compose([
-        transforms.Resize((256, 256), interpolation=InterpolationMode.BICUBIC),
-        transforms.ToTensor(),
-        _to_minus1_1(),
-    ])
-    ds = datasets.CIFAR100(root=root, train=train, download=True, transform=tfm)
-    if debug_overfit:
-        ds = torch.utils.data.Subset(ds, list(range(min(debug_overfit, len(ds)))))
-
-    sampler = DistributedSampler(ds, shuffle=train, drop_last=True) if world > 1 else None
-    loader = DataLoader(
-        ds,
-        batch_size=per_rank_bs,
-        shuffle=(sampler is None) and train,
-        sampler=sampler,
-        num_workers=_auto_workers(),
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4,
-        drop_last=True,
-        worker_init_fn=_seed_worker,
-        pin_memory_device="cuda" if torch.cuda.is_available() else ""
-    )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    def _iter():
-        if isinstance(loader.sampler, DistributedSampler):
-            loader.sampler.set_epoch(torch.randint(0, 2**31-1, (1,)).item())
-        for x_chw, y in loader:
-            x_chw = x_chw.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True).long()
-            yield x_chw.permute(0, 2, 3, 1).contiguous(), y
-    return _iter()
 
 # ----------------- public API -----------------
 def get_dataset(dataset_name: str, dataset_root_dir: str, batch_size: int, train: bool, debug_overfit: int = 0
                ) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
     """
-    Returns (images_bhwc, labels) on GPU, float32 in [-1,1], BHWC.
+    Returns (images_bchw, labels) on GPU, float32 in [-1,1], BHWC.
     Supported dataset_name:
       - "tiny-imagenet-256"  -> auto-downloads Tiny-ImageNet-200, centersquare->256
-      - "cifar100-256"       -> downloads CIFAR-100, upscales to 256
       - "imagenet-256"       -> ImageNet TFRecords (set IMAGENET_TFRECORD_ROOT)
+      - "celeba-256"       -> ImageNet TFRecords (set IMAGENET_TFRECORD_ROOT)
     """
     name = dataset_name.lower()
     if name.startswith("tiny-imagenet"):
         return _get_tiny_imagenet_iter(dataset_root_dir, batch_size, train, debug_overfit)
-    elif name.startswith("cifar100"):
-        return _get_cifar100_iter(dataset_root_dir, batch_size, train, debug_overfit)
+    elif name.startswith("celeba"):
+        return _get_celeba_iter(dataset_root_dir, batch_size, train, debug_overfit, image_size=256)
     elif name.startswith(("imagenet", "imagenet2012")):
         return _get_imagenet_iter(dataset_root_dir, batch_size, train, debug_overfit, image_size=256)
     else:
