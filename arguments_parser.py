@@ -20,22 +20,21 @@ class RuntimeCfg:
     max_steps: int = 1_000_000
     debug_overfit: int = 0
     mode: str = "train"  # train | inference
-    inference_timesteps: int = 128
+    inference_timesteps: int = 30
     inference_cfg_scale: int = 1.0
 
 
 @dataclass
 class ModelCfg:
-    model_id: str = "DiT-L/2"
-    lr: float = 1e-4
-    dropout: float = 0.0
-    mlp_ratio: float = 1.0
+    model_id: str = "DiT-B/2"
+    mlp_ratio: float = 4.0
     class_dropout_prob: float = 0.1
-    denoise_timesteps: int = 250
+
+    lr: float = 1e-4
+    denoise_timesteps: int = 128
     cfg_scale: float = 1.5
-    use_cosine: int = 0
-    warmup: int = 0
-    use_ema: int = 0
+    warmup: int = 10_000
+    use_ema: int = 1
     use_stable_vae: int = 1
     t_sampling: str = "discrete-dt"
     dt_sampling: str = "uniform"

@@ -75,12 +75,15 @@ def print_gpu_info(rank=0, world_size=1, local_rank=0):
     print("===================================")
 
 
-def ddp_mean_scalar(x: float, device):
-    t = torch.tensor([x], device=device, dtype=torch.float32)
+def ddp_mean(loss: torch.Tensor) -> float | None:
+    x = loss.detach().float()               # stay on GPU, fp32
     if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(t, op=dist.ReduceOp.SUM)
-        t /= dist.get_world_size()
-    return float(t.item())
+        dist.reduce(x, dst=0, op=dist.ReduceOp.SUM)   # sum to rank 0
+        if dist.get_rank() == 0:
+            x /= dist.get_world_size()
+            return x.item()
+        return None
+    return x.item()
 
 
 # ---------------- Train ----------------
@@ -147,23 +150,9 @@ def main():
     if model_cfg.use_stable_vae:
         vae = StableVAE(device)
 
-        # helpers to keep BHWC IO for the model
-        @torch.no_grad()
-        def vae_encode_bchw(x_bchw: torch.Tensor) -> torch.Tensor:
-            # returns BHWC latents
-            z_bchw = vae.encode(x_bchw)                 # BCHW (latents)
-            return z_bchw
-
-        @torch.no_grad()
-        def vae_decode_bchw(lat_bchw: torch.Tensor) -> torch.Tensor:
-            x = vae.decode(lat_bchw)                      # BCHW in [-1,1] ??
-            return x
-    else:
-        vae_encode_bchw = vae_decode_bchw = None
-
     def maybe_encode(x_bchw):
-        if model_cfg.use_stable_vae and vae_encode_bchw is not None and 'latent' not in runtime_cfg.dataset_name:
-            return vae_encode_bchw(x_bchw)
+        if model_cfg.use_stable_vae:
+            return vae.encode(x_bchw)
         return x_bchw
 
     # one pass to know channels
@@ -188,9 +177,15 @@ def main():
         )
 
     live_model = dit.module if is_ddp else dit
+
     # EMA model: deep copy + move to device
-    ema_model = copy.deepcopy(live_model).to(device)
-    ema_model.eval()  # optional, but typical for EMA
+    ema_model = None
+    ema_t = None
+    EMA_DECAY = 0.9999
+    if model_cfg.use_ema:
+        ema_model = copy.deepcopy(live_model).to(device)
+        ema_model.eval()
+        for p in ema_model.parameters(): p.data = p.data.float(); p.requires_grad_(False)
 
     teacher_model = None
     if model_cfg.train_type in ("progressive", "consistency-distillation"):
@@ -199,19 +194,31 @@ def main():
         teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
 
     # ----- opt + sched -----
+    base_lr = model_cfg.lr
+    warmup = model_cfg.warmup
+    min_lr = 0.1 * base_lr
+
     def param_groups(m: nn.Module, wd: float):
         decay, no_decay = [], []
+        skip = ("bias", "pos_embed", "cls_token", "time_embed", "label_embed", "embed", "norm", "ln")
         for n, p in m.named_parameters():
-            if not p.requires_grad: continue
-            if p.ndim == 1 or n.endswith(".bias"): no_decay.append(p)
-            else: decay.append(p)
+            if not p.requires_grad:
+                continue
+            if p.ndim == 1 or any(s in n.lower() for s in skip):
+                no_decay.append(p)  # norm/embeds/bias -> no WD
+            else:
+                decay.append(p)  # linear/conv weights -> WD
         return [{"params": decay, "weight_decay": wd},
                 {"params": no_decay, "weight_decay": 0.0}]
-    base_lr = model_cfg.lr
-    lr_sched = (WarmupCosine(base_lr, model_cfg.warmup, runtime_cfg.max_steps)
-                if model_cfg.use_cosine else
-                (LinearWarmup(base_lr, model_cfg.warmup) if model_cfg.warmup > 0 else (lambda s: base_lr)))
-    opt = torch.optim.AdamW(param_groups(dit, wd=0.0), lr=base_lr, betas=(0.9, 0.999),)
+
+    def lr_sched(step):
+        # linear warmup -> cosine decay to min_lr
+        if step < warmup:
+            return base_lr * (step / max(1, warmup))
+        t = (step - warmup) / max(1, runtime_cfg.max_steps - warmup)
+        return min_lr + 0.5 * (base_lr - min_lr) * (1 + math.cos(math.pi * t))
+
+    opt = torch.optim.AdamW(param_groups(dit, wd=0.05), lr=base_lr, betas=(0.9, 0.95), eps=1e-8, fused=True)
 
     amp_dtype = torch.bfloat16  # match original-style BF16
     #    scaler = GradScaler('cuda', enabled=(amp_dtype is torch.float16))
@@ -279,12 +286,10 @@ def main():
         # build dataset iters again (not consumed)
         do_inference(cfg,
                      dit.module if is_ddp else dit,
-                     (dit.module if is_ddp else dit) if ema_model is None else None,
-                     # pass a real ema_model if you keep a separate module
+                     ema_model,
                      dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                    per_rank_bs, True, runtime_cfg.debug_overfit),
-                     vae_encode=vae_encode_bchw,
-                     vae_decode=vae_decode_bchw,
+                     vae=vae,
                      step=global_step)
         return
 
@@ -303,15 +308,9 @@ def main():
         print("==========================================================================")
         print("====================== start training loop ===============================")
         print("==========================================================================")
-    
-    #pbar = tqdm(range(global_step + 1, runtime_cfg.max_steps + 1),
-    #            disable=is_ddp and rank != 0, dynamic_ncols=True)
 
     accum_steps = 1  # set >1 if you use gradient accumulation
     pbar = tqdm(total=runtime_cfg.max_steps + 1, dynamic_ncols=True)
-    ema_t = None
-    EMA_EVERY = 10
-    EMA_DECAY = 0.9999
     step, max_steps = global_step+1, runtime_cfg.max_steps + 1  # e.g., 8001
 
     while step < max_steps:
@@ -323,16 +322,16 @@ def main():
         # targets per train_type
         if model_cfg.train_type == 'flow_matching':
             x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels)
-        elif model_cfg.train_type == 'shortcut':
-            x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
-        elif model_cfg.train_type == 'progressive':
-            x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, batch_images, batch_labels, step=step)
-        elif model_cfg.train_type == 'consistency-distillation':
-            x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, call_model_student_ema, batch_images, batch_labels)
-        elif model_cfg.train_type == 'consistency':
-            x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_student_ema, batch_images, batch_labels)
-        elif model_cfg.train_type == 'livereflow':
-            x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
+        #elif model_cfg.train_type == 'shortcut':
+        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
+        #elif model_cfg.train_type == 'progressive':
+        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, batch_images, batch_labels, step=step)
+        #elif model_cfg.train_type == 'consistency-distillation':
+        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, call_model_student_ema, batch_images, batch_labels)
+        #elif model_cfg.train_type == 'consistency':
+        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_student_ema, batch_images, batch_labels)
+        #elif model_cfg.train_type == 'livereflow':
+        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
         else:
             raise ValueError(f"Unknown train_type: {model_cfg.train_type}")
 
@@ -348,15 +347,19 @@ def main():
         opt.step()
 
         # EMA update
-        if model_cfg.use_ema and ema_model is not None and (step % EMA_EVERY == 0):
-            ema_model.update(dit.module if is_ddp else dit, decay=EMA_DECAY ** EMA_EVERY)
+        if ema_model is not None:
+            with torch.no_grad():
+                for p_ema, p in zip(ema_model.parameters(), (dit.module if is_ddp else dit).parameters()):
+                    p_ema.data.mul_(EMA_DECAY).add_(p.data.float(), alpha=1 - EMA_DECAY)  # keep EMA in fp32
 
         # log (every log_interval)
+        lr = lr_sched(step)
+        for g in opt.param_groups: g['lr'] = lr
+
         if (step % runtime_cfg.log_interval) == 0:
             # cheap scalars on every rank, averaged like JAX
-            train_loss_mean = ddp_mean_scalar(float(loss.detach().cpu()), device)
-            vmag_mean = ddp_mean_scalar(float(v_pred.square().mean().sqrt().detach().cpu()), device)
-            lr_mean = ddp_mean_scalar(float(lr_sched(step)), device)
+            train_loss_mean = ddp_mean(loss)
+            vmag_mean = ddp_mean(v_pred.square().mean().sqrt())
 
             # quick, single-rank validation (no activations)
             if (not is_ddp) or rank == 0:
@@ -372,14 +375,14 @@ def main():
                 vlbl = vlbl.to(device, non_blocking=True)
 
                 with torch.inference_mode(), autocast('cuda', dtype=amp_dtype):
-                    if model_cfg.train_type in ("flow_matching", "shortcut", "livereflow"):
-                        v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, vimg, vlbl)
-                    elif model_cfg.train_type == "progressive":
-                        v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_teacher, vimg, vlbl,
-                                                                            step=step)
-                    else:  # "consistency" / "consistency-distillation"
-                        v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_student_ema, vimg,
-                                                                            vlbl)
+                    #if model_cfg.train_type in ("flow_matching", "shortcut", "livereflow"):
+                    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, vimg, vlbl)
+                    #elif model_cfg.train_type == "progressive":
+                    #    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_teacher, vimg, vlbl,
+                    #                                                        step=step)
+                    #else:  # "consistency" / "consistency-distillation"
+                    #    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_student_ema, vimg,
+                    #                                                        vlbl)
 
                     v_pred2 = dit(v_x_t, v_t_vec, v_dt, v_lbl, train=False, return_activations=False)
                     v_loss = ((v_pred2 - v_v_t).pow(2).mean(dim=(1, 2, 3))).mean().item()
@@ -387,18 +390,16 @@ def main():
                 wandb.log({
                     "training/loss": train_loss_mean,
                     "training/v_magnitude_prime": vmag_mean,
-                    "training/lr": lr_mean,
+                    "training/lr": lr,
                     "training/loss_valid": v_loss,
                 }, step=step)
 
-        # stepwise LR (optional)
-        for g in opt.param_groups: g['lr'] = lr_sched(step)
 
         # progressive: refresh teacher
-        if model_cfg.train_type == 'progressive':
-            num_sections = int(math.log2(model_cfg.denoise_timesteps))
-            if step % max(1, (runtime_cfg.max_steps // max(1, num_sections))) == 0 and teacher_model is not None:
-                teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
+        #if model_cfg.train_type == 'progressive':
+        #    num_sections = int(math.log2(model_cfg.denoise_timesteps))
+        #    if step % max(1, (runtime_cfg.max_steps // max(1, num_sections))) == 0 and teacher_model is not None:
+        #        teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
 
         # eval
         if (step % runtime_cfg.eval_interval) == 0 and rank == 0:
@@ -406,12 +407,11 @@ def main():
             if (not is_ddp) or rank == 0:
                 do_inference(cfg,
                              dit.module if is_ddp else dit,
-                             (dit.module if is_ddp else dit) if ema_model is None else None,
+                             ema_model,
                              # pass a real ema_model if you keep a separate module
                              dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                            per_rank_bs, True, runtime_cfg.debug_overfit),
-                             vae_encode=vae_encode_bchw,
-                             vae_decode=vae_decode_bchw,
+                             vae=vae,
                              step=step)
 
         # save
@@ -433,14 +433,13 @@ def main():
 
         step += 1
 
+    print("===========done training===========")
     do_inference(cfg,
                  dit.module if is_ddp else dit,
-                 (dit.module if is_ddp else dit) if ema_model is None else None,
-                 # pass a real ema_model if you keep a separate module
+                 ema_model,
                  dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                per_rank_bs, True, runtime_cfg.debug_overfit),
-                 vae_encode=vae_encode_bchw,
-                 vae_decode=vae_decode_bchw,
+                 vae=vae,
                  num_generations=50000,
                  calc_fid=True)
 
