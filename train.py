@@ -228,11 +228,7 @@ def main():
     if runtime_cfg.load_dir:
         ckpt_path = runtime_cfg.load_dir if runtime_cfg.load_dir.endswith(".pt") else os.path.join(runtime_cfg.load_dir, "model.pt")
         try:
-            step, extra = load_checkpoint(ckpt_path, live_model, opt, ema=None, map_location=device)
-            if extra and "ema_model" in extra:
-                ema_model.load_state_dict(extra["ema_model"])
-            else:
-                ema_model.load_state_dict(live_model.state_dict())
+            step = load_checkpoint(ckpt_path, live_model, opt, ema=ema_model, map_location=device)
             global_step = int(step)
             if (not is_ddp) or rank == 0:
                 print(f"[load] restored step={global_step} from {ckpt_path}")
@@ -285,7 +281,6 @@ def main():
     if runtime_cfg.mode != "train":
         # build dataset iters again (not consumed)
         do_inference(cfg,
-                     dit.module if is_ddp else dit,
                      ema_model,
                      dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                    per_rank_bs, True, runtime_cfg.debug_overfit),
@@ -406,7 +401,6 @@ def main():
             print("================= evaluating =================")
             if (not is_ddp) or rank == 0:
                 do_inference(cfg,
-                             dit.module if is_ddp else dit,
                              ema_model,
                              # pass a real ema_model if you keep a separate module
                              dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
@@ -435,7 +429,6 @@ def main():
 
     print("===========done training===========")
     do_inference(cfg,
-                 dit.module if is_ddp else dit,
                  ema_model,
                  dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                per_rank_bs, True, runtime_cfg.debug_overfit),

@@ -50,6 +50,4 @@ def load_checkpoint(path, model, optimizer=None, ema=None, map_location="cpu"):
                 p.data.copy_(q)
 
     step = ckpt.get("step", 0)
-    extra = ckpt.get("extra", None)
-    return step, extra
-
+    return step
