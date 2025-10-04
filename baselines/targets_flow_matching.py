@@ -35,9 +35,16 @@ def get_targets(cfg, gen, images, labels):
     labels_dropped = torch.where(mask, torch.full_like(labels, cfg.runtime_cfg.num_classes), labels)
 
     # t in [0,1]
-    t = torch.randint(0, cfg.model_cfg.denoise_timesteps, (B,), generator=gen, device=device)
-    t = (t.float() + 0.5) / float(cfg.model_cfg.denoise_timesteps)
+    # Beta(2,2) via Kumaraswamy, with your RNG 'gen'
+    rho = 2.0
+    u = torch.rand(B, device=device, generator=gen)
+    t = (1 - (1 - u).pow(1 / rho)).pow(1 / rho)
+    t = t.clamp(0.02, 0.98)
     t_full = t.view(B, 1, 1, 1)
+
+    #t = torch.randint(0, cfg.model_cfg.denoise_timesteps, (B,), generator=gen, device=device)
+    #t = (t.float() + 0.5) / float(cfg.model_cfg.denoise_timesteps)
+    #t_full = t.view(B, 1, 1, 1)
 
     # flow pairs
     x1 = images
