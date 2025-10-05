@@ -23,7 +23,7 @@ def make_real_stats(
     loader,
     stats_out_path: str = "imagenet256_fidstats.pt",
     device: str = "cuda",
-    from_neg1_to_unit_range: bool = True,
+    image_size: int = 256,
 ):
     """
     Streams real images from `real_loader`, computes FID 'real' stats, and saves TorchMetrics state_dict to disk.
@@ -35,7 +35,7 @@ def make_real_stats(
     fid = FrechetInceptionDistance(
         feature=2048,
         normalize=True,            # interpret inputs as floats in [0,1]
-        input_img_size=(3, 299, 299),
+        input_img_size=(3, image_size, image_size),
         antialias=True,
     ).to(device)
 
@@ -73,8 +73,9 @@ def make_real_stats(
 if __name__ == "__main__":
     ds_root = r'C:\Users\azmih\Desktop\Projects\datasets\celebA_hq_256\celeba_hq_256'
     batch_size = 32
+    image_size = 256
     #ds = ImageNetTFRecord(ds_root, True, 1, 0, image_size=256)
-    ds = FlatImageFolder(root=ds_root, image_size=256)
+    ds = FlatImageFolder(root=ds_root, image_size=image_size)
 
     # Windows uses spawn ⇒ start with num_workers=0; on Linux you can bump it
     num_workers = 0 if os.name == "nt" else 1
@@ -96,5 +97,5 @@ if __name__ == "__main__":
     num_images = make_real_stats(loader,
     stats_out_path=r"C:\Users\azmih\Desktop\Projects\Generative_sampling\data\celeba256_fidstats_gt.pt",
     device=device,
-    from_neg1_to_unit_range=True)
+    image_size=image_size)
     print(f"Number of images seen in fid calc: {num_images}")

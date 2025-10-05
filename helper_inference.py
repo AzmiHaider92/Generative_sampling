@@ -32,8 +32,8 @@ def do_inference(
 
     Noise = torch.randn(images_shape)
 
-    denoise_timesteps = 32 # cfg.runtime_cfg.inference_timesteps
-    cfg_scale = 0 #cfg.runtime_cfg.inference_cfg_scale
+    denoise_timesteps = cfg.runtime_cfg.inference_timesteps
+    cfg_scale = cfg.runtime_cfg.inference_cfg_scale
     delta_t = 1.0 / denoise_timesteps
 
     print(
@@ -50,7 +50,7 @@ def do_inference(
         fid = FrechetInceptionDistance(
             feature=2048,
             normalize=True,  # inputs must be [0,1]
-            input_img_size=(3, 299, 299),
+            input_img_size=(3, 256, 256),
             antialias=True,
         ).to(device)
 
