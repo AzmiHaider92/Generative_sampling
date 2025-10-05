@@ -64,16 +64,26 @@ def _get_celeba_iter(root: str, per_rank_bs: int, train: bool, debug_overfit: in
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def _iter():
-        # new epoch shuffling for DDP
-        if isinstance(sampler, DistributedSampler):
-            sampler.set_epoch(torch.randint(0, 2**31 - 1, (1,)).item())
+        epoch = 0
+        while True:
+            # For DDP: ensure different order each epoch
+            if isinstance(sampler, DistributedSampler):
+                sampler.set_epoch(epoch)
 
-        for x_chw, y in loader:
-            x_chw = x_chw.to(device, non_blocking=True)        # [B,C,H,W] in [-1,1]
-            # y is dummy zeros; keep dtype long for code paths expecting class indices
-            if not torch.is_tensor(y):
-                y = torch.zeros(x_chw.size(0), dtype=torch.long)
-            y = y.to(device, non_blocking=True).long()
-            yield x_chw, y     # -> BHWC
+            for x_chw, y in loader:
+                x_chw = x_chw.to(device, non_blocking=True)     # [B,C,H,W] in [-1,1]
+
+                # keep dtype long for downstream "class index" paths
+                if not torch.is_tensor(y):
+                    y = torch.zeros(x_chw.size(0), dtype=torch.long)
+                y = y.to(device, non_blocking=True).long()
+
+                # If your model expects BHWC, uncomment the next line:
+                # x_bhwc = x_chw.permute(0, 2, 3, 1).contiguous()
+                # yield x_bhwc, y
+
+                yield x_chw, y  # CHW
+
+            epoch += 1  # next epoch (keeps iterator infinite)
 
     return _iter()
