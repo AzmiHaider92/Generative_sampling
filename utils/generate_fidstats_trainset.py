@@ -5,6 +5,8 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 from tqdm import tqdm
+
+from utils.celeba_hq import FlatImageFolder
 from utils.datasets import get_dataset as get_dataset_iter
 from utils.imagenet_tfds import ImageNetTFRecord
 
@@ -69,9 +71,10 @@ def make_real_stats(
 
 
 if __name__ == "__main__":
-    ds_root = r'/mnt/Generative_sampling/data/imagenet_256'
+    ds_root = r'C:\Users\azmih\Desktop\Projects\datasets\celebA_hq_256\celeba_hq_256'
     batch_size = 32
-    ds = ImageNetTFRecord(ds_root, True, 1, 0, image_size=256)
+    #ds = ImageNetTFRecord(ds_root, True, 1, 0, image_size=256)
+    ds = FlatImageFolder(root=ds_root, image_size=256)
 
     # Windows uses spawn ⇒ start with num_workers=0; on Linux you can bump it
     num_workers = 0 if os.name == "nt" else 1
@@ -91,7 +94,7 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     num_images = make_real_stats(loader,
-    stats_out_path=r"/mnt/Generative_sampling/data/imagenet256_fidstats_gt.pt",
+    stats_out_path=r"C:\Users\azmih\Desktop\Projects\Generative_sampling\data\celeba256_fidstats_gt.pt",
     device=device,
     from_neg1_to_unit_range=True)
     print(f"Number of images seen in fid calc: {num_images}")
