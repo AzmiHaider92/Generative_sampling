@@ -285,7 +285,9 @@ def main():
                      dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                    per_rank_bs, True, runtime_cfg.debug_overfit),
                      vae=vae,
-                     step=global_step)
+                     step=global_step,
+                     num_generations=runtime_cfg.inference_num_generations,
+                     calc_fid=runtime_cfg.calc_fid)
         return
 
     # ----- training loop -----

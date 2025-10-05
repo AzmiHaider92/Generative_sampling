@@ -22,6 +22,8 @@ class RuntimeCfg:
     mode: str = "train"  # train | inference
     inference_timesteps: int = 30
     inference_cfg_scale: int = 1.0
+    inference_num_generations: int = 8
+    calc_fid: int = 0
 
 
 @dataclass
