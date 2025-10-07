@@ -283,7 +283,7 @@ def main():
         do_inference(cfg,
                      ema_model,
                      dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
-                                                   per_rank_bs, True, runtime_cfg.debug_overfit),
+                                                   runtime_cfg.batch_size, True, runtime_cfg.debug_overfit),
                      vae=vae,
                      step=global_step,
                      num_generations=runtime_cfg.inference_num_generations,
