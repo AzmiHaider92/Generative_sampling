@@ -282,6 +282,7 @@ def main():
         # build dataset iters again (not consumed)
         do_inference(cfg,
                      ema_model,
+                     dataset_iter=None,
                      vae=vae,
                      step=global_step,
                      num_generations=runtime_cfg.inference_num_generations,
@@ -403,6 +404,7 @@ def main():
             if (not is_ddp) or rank == 0:
                 do_inference(cfg,
                              ema_model,
+                             dataset_iter=None,
                              vae=vae,
                              step=step,
                              use_distributed=False)
@@ -429,6 +431,7 @@ def main():
     print("===========done training===========")
     do_inference(cfg,
                  ema_model,
+                 dataset_iter=None,
                  vae=vae,
                  num_generations=50000,
                  calc_fid=True,

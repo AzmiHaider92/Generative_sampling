@@ -7,6 +7,7 @@ import torchvision.utils as vutils
 from torchvision.utils import save_image
 from torchmetrics.image import FrechetInceptionDistance
 from utils.datasets import get_dataset as get_dataset_iter
+os.environ["INFER_BARRIER_TIMEOUT_S"] = "60"
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -151,7 +152,7 @@ def do_inference(
 
     # Compute/log FID
     if fid is not None and ((not is_dist) or rank == 0):
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             fid_score = fid.compute().item()
         print(f"[FID] {fid_score:.4f}  (N={n_total if is_dist else generated})")
         if hasattr(wandb, "log") and wandb.run is not None:
