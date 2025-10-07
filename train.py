@@ -282,8 +282,6 @@ def main():
         # build dataset iters again (not consumed)
         do_inference(cfg,
                      ema_model,
-                     dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
-                                                   runtime_cfg.batch_size, True, runtime_cfg.debug_overfit),
                      vae=vae,
                      step=global_step,
                      num_generations=runtime_cfg.inference_num_generations,
@@ -405,11 +403,9 @@ def main():
             if (not is_ddp) or rank == 0:
                 do_inference(cfg,
                              ema_model,
-                             # pass a real ema_model if you keep a separate module
-                             dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
-                                                           per_rank_bs, True, runtime_cfg.debug_overfit),
                              vae=vae,
-                             step=step)
+                             step=step,
+                             use_distributed=False)
 
         # save
         if (step % runtime_cfg.save_interval) == 0 and runtime_cfg.save_dir and rank == 0:
@@ -433,8 +429,6 @@ def main():
     print("===========done training===========")
     do_inference(cfg,
                  ema_model,
-                 dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
-                                               per_rank_bs, True, runtime_cfg.debug_overfit),
                  vae=vae,
                  num_generations=50000,
                  calc_fid=True,
