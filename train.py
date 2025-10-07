@@ -287,7 +287,8 @@ def main():
                      vae=vae,
                      step=global_step,
                      num_generations=runtime_cfg.inference_num_generations,
-                     calc_fid=runtime_cfg.calc_fid)
+                     calc_fid=runtime_cfg.calc_fid,
+                     use_distributed=True)
         return
 
     # ----- training loop -----
@@ -436,7 +437,8 @@ def main():
                                                per_rank_bs, True, runtime_cfg.debug_overfit),
                  vae=vae,
                  num_generations=50000,
-                 calc_fid=True)
+                 calc_fid=True,
+                 use_distributed=True)
 
     if is_ddp:
         dist.barrier()
