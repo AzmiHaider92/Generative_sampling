@@ -282,12 +282,9 @@ def main():
         # build dataset iters again (not consumed)
         inference(cfg,
                      ema_model,
-                     dataset_iter=None,
                      vae=vae,
-                     step=global_step,
                      num_generations=runtime_cfg.inference_num_generations,
-                     calc_fid=runtime_cfg.calc_fid,
-                     use_distributed=True)
+                     fid_stats_path=runtime_cfg.fid_stats)
         return
 
     # ----- training loop -----
@@ -431,12 +428,10 @@ def main():
 
     print("===========done training===========")
     inference(cfg,
-                 ema_model,
-                 dataset_iter=None,
-                 vae=vae,
-                 num_generations=50000,
-                 calc_fid=True,
-                 use_distributed=True)
+              ema_model,
+              vae=vae,
+              num_generations=runtime_cfg.inference_num_generations,
+              fid_stats_path=runtime_cfg.fid_stats)
 
     if is_ddp:
         dist.barrier()
