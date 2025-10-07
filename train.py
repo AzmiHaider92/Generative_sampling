@@ -279,12 +279,15 @@ def main():
 
     # ----- eval/infer early exit -----
     if runtime_cfg.mode != "train":
-        # build dataset iters again (not consumed)
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
         inference(cfg,
                      ema_model,
                      vae=vae,
                      num_generations=runtime_cfg.inference_num_generations,
                      fid_stats_path=runtime_cfg.fid_stats)
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
         return
 
     # ----- training loop -----
@@ -427,13 +430,20 @@ def main():
         step += 1
 
     print("===========done training===========")
-    inference(cfg,
-              ema_model,
-              vae=vae,
-              num_generations=runtime_cfg.inference_num_generations,
-              fid_stats_path=runtime_cfg.fid_stats)
+    # everyone enters together
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
 
-    if is_ddp:
+    fid = inference(                       # or do_inference_fid_ddp(...
+            cfg,
+            ema_model,
+            vae=vae,
+            num_generations=50000,  # total across ALL GPUs
+            fid_stats_path=runtime_cfg.fid_stats
+            )
+
+    # wait for all ranks to finish before tearing down
+    if dist.is_available() and dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
 

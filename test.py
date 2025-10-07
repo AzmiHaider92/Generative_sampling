@@ -8,7 +8,7 @@ import tqdm
 from torchmetrics.image import FrechetInceptionDistance
 import os
 from utils.datasets import get_dataset as get_dataset_iter
-
+import time
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
@@ -127,7 +127,7 @@ def validate(
     # Optional FID computation against provided stats (approximate, subset)
     if fid is not None:
         # Compute FID
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             score = fid.compute().item()
         print(f"============== FID = {score:.4f}  (N={num_generations}) ====================")
 
@@ -205,9 +205,26 @@ def inference(
     # -------- FID setup --------
     fid = None
     if fid_stats_path is not None:
-        fid = FrechetInceptionDistance(
-            feature=2048, normalize=True, input_img_size=(3, 299, 299), antialias=True
-        ).to(device)
+        # --- build FID (version-safe) ---
+        try:
+            fid = FrechetInceptionDistance(
+                    feature=2048,
+                    normalize=True,
+                    input_img_size=(3, 256, 256),
+                    antialias=True,
+                    sync_on_compute=False,      # works on newer TM
+                    ).to(device)
+        except TypeError:
+            # older TorchMetrics: no sync_on_compute arg in __init__
+            fid = FrechetInceptionDistance(
+                    feature=2048,
+                    normalize=True,
+                    input_img_size=(3, 256, 256),
+                    antialias=True,
+                    ).to(device)
+            if hasattr(fid, "sync_on_compute"):
+                fid.sync_on_compute = False  # disable internal DDP sync
+
         d = torch.load(fid_stats_path, map_location=device)
         # Load REAL side only
         fid.real_features_sum.copy_(d["real_features_sum"].to(device))
@@ -282,13 +299,15 @@ def inference(
         if is_dist:
             for name in ["fake_features_sum", "fake_features_cov_sum", "fake_features_num_samples"]:
                 dist.all_reduce(getattr(fid, name), op=dist.ReduceOp.SUM)
+        
         if (not is_dist) or rank == 0:
-            with torch.cuda.amp.autocast(enabled=False):
+            torch.cuda.synchronize()
+            with torch.amp.autocast('cuda', enabled=False):
                 fid_score = fid.compute().item()
-            print(f"[FID] {fid_score:.4f}  (N={n_total if is_dist else generated})")
+            torch.cuda.synchronize()
             if hasattr(wandb, "log") and wandb.run is not None:
                 wandb.log({"metrics/FID": fid_score})
-
+        
     # -------- Save a small grid (rank 0) --------
     if rank == 0 and len(preview) > 0:
         imgs = torch.stack(preview, dim=0)
