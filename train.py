@@ -18,7 +18,7 @@ from utils.datasets import get_dataset as get_dataset_iter
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from utils.sharding import ddp_setup
 from utils.stable_vae import StableVAE
-from helper_inference import do_inference
+from test import inference, validate
 import torch.multiprocessing as mp
 mp.set_sharing_strategy("file_system")
 # At the very top of train.py (before DataLoaders are created)
@@ -280,7 +280,7 @@ def main():
     # ----- eval/infer early exit -----
     if runtime_cfg.mode != "train":
         # build dataset iters again (not consumed)
-        do_inference(cfg,
+        inference(cfg,
                      ema_model,
                      dataset_iter=None,
                      vae=vae,
@@ -402,12 +402,13 @@ def main():
         if (step % runtime_cfg.eval_interval) == 0 and rank == 0:
             print("================= evaluating =================")
             if (not is_ddp) or rank == 0:
-                do_inference(cfg,
+                validate(cfg,
                              ema_model,
-                             dataset_iter=None,
+                             # pass a real ema_model if you keep a separate module
+                             dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
+                                                           per_rank_bs, True, runtime_cfg.debug_overfit),
                              vae=vae,
-                             step=step,
-                             use_distributed=False)
+                             step=step)
 
         # save
         if (step % runtime_cfg.save_interval) == 0 and runtime_cfg.save_dir and rank == 0:
@@ -429,7 +430,7 @@ def main():
         step += 1
 
     print("===========done training===========")
-    do_inference(cfg,
+    inference(cfg,
                  ema_model,
                  dataset_iter=None,
                  vae=vae,
