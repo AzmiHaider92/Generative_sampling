@@ -155,7 +155,7 @@ class DiT(nn.Module):
                  mlp_ratio=4.0,
                  class_dropout_prob=0.1,
                  num_classes=1000,
-                 ignore_dt=True,
+                 ignore_k=True,
                  image_size=32,
     ):
         super().__init__()
@@ -163,11 +163,11 @@ class DiT(nn.Module):
         self.out_channels = in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
-        self.ignore_dt = ignore_dt
+        self.ignore_k = ignore_k
 
         self.x_embedder = PatchEmbed(image_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.dt_embedder = TimestepEmbedder(hidden_size)
+        self.k_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
@@ -204,8 +204,8 @@ class DiT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
-        nn.init.normal_(self.dt_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.dt_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.k_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.k_embedder.mlp[2].weight, std=0.02)
 
         # Zero-out adaLN modulation layers in DiT blocks:
         for block in self.blocks:
@@ -233,21 +233,21 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, dt, y, train=True, return_activations=False):
+    def forward(self, x, t, k, y, train=True):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         """
-        if self.ignore_dt:
-            dt = torch.zeros_like(t)
+        if self.ignore_k:
+            k = torch.zeros_like(t)
 
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t)                   # (N, D)
-        dt = self.dt_embedder(dt)                   # (N, D)
+        k = self.k_embedder(k)                   # (N, D)
         y = self.y_embedder(y, train)    # (N, D)
-        c = t + y + dt                                # (N, D)
+        c = t + y + k                                # (N, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
