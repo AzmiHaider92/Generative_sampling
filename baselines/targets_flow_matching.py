@@ -1,6 +1,6 @@
-# targets_naive_torch.py
 import torch
 import math
+
 
 @torch.no_grad()
 def get_targets(cfg, gen, images, labels):
@@ -42,10 +42,6 @@ def get_targets(cfg, gen, images, labels):
     t = t.clamp(0.02, 0.98)
     t_full = t.view(B, 1, 1, 1)
 
-    #t = torch.randint(0, cfg.model_cfg.denoise_timesteps, (B,), generator=gen, device=device)
-    #t = (t.float() + 0.5) / float(cfg.model_cfg.denoise_timesteps)
-    #t_full = t.view(B, 1, 1, 1)
-
     # flow pairs
     x1 = images
     x0 = torch.randn(images.shape, dtype=images.dtype, device=images.device, generator=gen)
@@ -53,7 +49,7 @@ def get_targets(cfg, gen, images, labels):
     x_t = (1.0 - t_full) * x0 + t_full * x1
     v_t = x1 - x0
 
-    dt_flow = int(math.log2(cfg.model_cfg.denoise_timesteps))
-    dt_base = torch.full((B,), dt_flow, device=device, dtype=torch.float32)
-
-    return x_t, v_t, t, dt_base, labels_dropped, None
+    T = int(cfg.model_cfg.denoise_timesteps)
+    K = int(math.log2(T))  # scalar max level
+    k = torch.full((B,), float(K), device=device, dtype=torch.float32)  # per-sample level code (sentinel)
+    return x_t, v_t, t, k, labels_dropped, None
