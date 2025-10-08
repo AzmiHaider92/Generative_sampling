@@ -167,7 +167,7 @@ def main():
         class_dropout_prob=model_cfg.class_dropout_prob,
         num_classes=runtime_cfg.num_classes,
         mlp_ratio=model_cfg.mlp_ratio,
-        ignore_dt=(model_cfg.train_type not in ("shortcut", "livereflow")),
+        ignore_k=(model_cfg.train_type not in ("shortcut", "livereflow")),
         image_size=H,
     ).to(device)
 
@@ -240,40 +240,40 @@ def main():
     def import_targets(train_type: str):
         name = {
             "flow_matching": "baselines.targets_flow_matching",
-            "shortcut": "targets_shortcut",
-            "progressive": "targets_progressive",
-            "consistency-distillation": "targets_consistency_distillation",
-            "consistency": "targets_consistency_training",
-            "livereflow": "targets_livereflow",
+            "shortcut": "baselines.targets_shortcut",
+            #"progressive": "targets_progressive",
+            #"consistency-distillation": "targets_consistency_distillation",
+            #"consistency": "targets_consistency_training",
+            #"livereflow": "targets_livereflow",
         }[train_type]
         return importlib.import_module(name).get_targets
     get_targets = import_targets(model_cfg.train_type)
 
     # ----- model wrappers -----
     @torch.no_grad()
-    def _forward_model(m, x_t, t, dt_base, labels):
+    def _forward_model(m, x_t, t, k, labels):
         dev = next(m.parameters()).device
         # move inputs to the model's device
         x_t = x_t.to(dev, non_blocking=True)
         t = t.to(dev, dtype=torch.float32, non_blocking=True)
-        dt_base = dt_base.to(dev, dtype=torch.float32, non_blocking=True)
+        k = k.to(dev, dtype=torch.float32, non_blocking=True)
         labels = labels.to(dev, dtype=torch.long, non_blocking=True)
-        v_pred, _, _ = m(x_t, t, dt_base, labels, train=False, return_activations=False)
+        v_pred = m(x_t, t, k, labels, train=False)
         return v_pred
 
     @torch.no_grad()
-    def call_model(x_t, t, dt_base, labels, use_ema: bool = False):
+    def call_model(x_t, t, k, labels, use_ema: bool = False):
         m = ema_model if use_ema else (dit.module if is_ddp else dit)
-        return _forward_model(m, x_t, t, dt_base, labels)
+        return _forward_model(m, x_t, t, k, labels)
 
     @torch.no_grad()
-    def call_model_teacher(x_t, t, dt_base, labels, use_ema: bool = True):
+    def call_model_teacher(x_t, t, k, labels, use_ema: bool = True):
         m = teacher_model if (teacher_model is not None) else ema_model
-        return _forward_model(m, x_t, t, dt_base, labels)
+        return _forward_model(m, x_t, t, k, labels)
 
     @torch.no_grad()
-    def call_model_student_ema(x_t, t, dt_base, labels, use_ema: bool = True):
-        return _forward_model(ema_model, x_t, t, dt_base, labels)
+    def call_model_student_ema(x_t, t, k, labels, use_ema: bool = True):
+        return _forward_model(ema_model, x_t, t, k, labels)
 
     cfg = CFG(runtime_cfg=runtime_cfg, model_cfg=model_cfg, wandb_cfg=wandb_cfg)
 
@@ -318,9 +318,9 @@ def main():
 
         # targets per train_type
         if model_cfg.train_type == 'flow_matching':
-            x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels)
-        #elif model_cfg.train_type == 'shortcut':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
+            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels)
+        elif model_cfg.train_type == 'shortcut':
+            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model)
         #elif model_cfg.train_type == 'progressive':
         #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, batch_images, batch_labels, step=step)
         #elif model_cfg.train_type == 'consistency-distillation':
@@ -335,7 +335,7 @@ def main():
         # forward + loss
         opt.zero_grad(set_to_none=True)
         with autocast('cuda', dtype=amp_dtype):
-            v_pred = (dit)(x_t, t_vec, dt_base, labels_eff, train=True, return_activations=False)
+            v_pred = (dit)(x_t, t_vec, k_vec, labels_eff, train=True)
             mse = (v_pred - v_t).float().pow(2).mean(dim=(1, 2, 3))
             loss = mse.mean()
 
@@ -373,7 +373,7 @@ def main():
 
                 with torch.inference_mode(), autocast('cuda', dtype=amp_dtype):
                     #if model_cfg.train_type in ("flow_matching", "shortcut", "livereflow"):
-                    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, vimg, vlbl)
+                    v_x_t, v_v_t, v_t_vec, v_k_vec, v_lbl, _ = get_targets(cfg, gen, vimg, vlbl, call_model)
                     #elif model_cfg.train_type == "progressive":
                     #    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_teacher, vimg, vlbl,
                     #                                                        step=step)
@@ -381,7 +381,7 @@ def main():
                     #    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_student_ema, vimg,
                     #                                                        vlbl)
 
-                    v_pred2 = dit(v_x_t, v_t_vec, v_dt, v_lbl, train=False, return_activations=False)
+                    v_pred2 = dit(v_x_t, v_t_vec, v_k_vec, v_lbl, train=False)
                     v_loss = ((v_pred2 - v_v_t).pow(2).mean(dim=(1, 2, 3))).mean().item()
 
                 wandb.log({
