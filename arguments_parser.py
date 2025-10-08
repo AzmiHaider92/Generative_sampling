@@ -38,13 +38,15 @@ class ModelCfg:
     warmup: int = 10_000
     use_ema: int = 1
     use_stable_vae: int = 1
-    t_sampling: str = "discrete-dt"
-    dt_sampling: str = "uniform"
-    bootstrap_cfg: int = 0
+
+    train_type: str = "shortcut"   # flow_matching | shortcut | progressive | consistency[-distillation] | livereflow
+    dt_mode: str = "bins" # bins | uniform_log | uniform_linear
+
+    # bootstrapping in shortcut models
     bootstrap_every: int = 8
+    bootstrap_cfg: int = 0
     bootstrap_ema: int = 1
     bootstrap_dt_bias: int = 0
-    train_type: str = "shortcut"   # naive | shortcut | progressive | consistency[-distillation] | livereflow
 
 @dataclass
 class WandbCfg:
