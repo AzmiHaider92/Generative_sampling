@@ -395,7 +395,7 @@ def main():
         #        teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
 
         # eval
-        if (step % runtime_cfg.eval_interval) == 0 and rank == 0 or step == 1:
+        if ((step % runtime_cfg.eval_interval) == 0 or step == 1) and rank == 0 :
             print("================= evaluating =================")
             if (not is_ddp) or rank == 0:
                 validate(cfg,
