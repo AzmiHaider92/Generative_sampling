@@ -34,8 +34,6 @@ def validate(
     device = batch_images.device
     B = images_shape[0]
 
-    Noise = torch.randn(images_shape)
-
     denoise_timesteps = cfg.runtime_cfg.inference_timesteps
     cfg_scale = cfg.runtime_cfg.inference_cfg_scale
     dt = 1.0 / denoise_timesteps
@@ -75,8 +73,9 @@ def validate(
     nimgs_2_vis, imgs_2_vis = 0, []
     for fid_it in tqdm.tqdm(range(max(num_generations // B, 1))):
         labels = torch.randint(0, cfg.runtime_cfg.num_classes, (B,), device=device, dtype=torch.long)
-        labels_uncond = torch.full_like(labels, cfg.runtime_cfg.num_classes)
-        x = torch.tensor(Noise, device=device)
+        labels_uncond = torch.full_like(labels, cfg.runtime_cfg.num_classes if cfg.runtime_cfg.num_classes > 1 else 0)
+        x = torch.randn(images_shape, device=device)
+
         for ti in range(denoise_timesteps):
             t = (ti + 0.5) / denoise_timesteps
             t_vector = torch.full((B,), t, device=device, dtype=torch.float32)
@@ -86,7 +85,6 @@ def validate(
             elif cfg_scale == 0:
                 v = call_model(x, t_vector, k, labels_uncond)
             else:
-                labels_uncond = torch.full_like(labels, cfg.runtime_cfg.num_classes)
                 v_uncond = call_model(x, t_vector, k, labels_uncond)
                 v_cond = call_model(x, t_vector, k, labels)
                 v = v_uncond + cfg_scale * (v_cond - v_uncond)  # CFG mix :contentReference[oaicite:15]{index=15}

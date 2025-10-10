@@ -21,9 +21,9 @@ class FlatImageFolder(Dataset):
 
         self.files = files
         self.transform = transforms.Compose([
-            transforms.ToTensor(),                            # [0,1]
             transforms.Resize(image_size, antialias=True),
             transforms.CenterCrop(image_size),
+            transforms.ToTensor(),  # [0,1]
             transforms.Normalize([0.5, 0.5, 0.5],[0.5, 0.5, 0.5]),  # -> [-1,1]
         ])
 

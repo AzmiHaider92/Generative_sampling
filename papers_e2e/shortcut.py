@@ -218,7 +218,7 @@ def get_targets(cfg, gen, images, labels, call_model, step, force_t: float = -1,
             t_ext = torch.cat([t, t[:num_dt_cfg]], 0)
             k_ext = torch.cat([k_teacher_code, k_teacher_code[:num_dt_cfg]], 0)
             labels_ext = torch.cat(
-                [b_labels, torch.full((num_dt_cfg,), int(cfg.runtime_cfg.num_classes),
+                [b_labels, torch.full((num_dt_cfg,), cfg.runtime_cfg.num_classes if cfg.runtime_cfg.num_classes > 1 else 0,
                                       device=device, dtype=torch.long)], 0
             )
 
@@ -271,7 +271,7 @@ def get_targets(cfg, gen, images, labels, call_model, step, force_t: float = -1,
         p = float(cfg.model_cfg.class_dropout_prob)
         drop = torch.bernoulli(torch.full((rest,), p, device=device)).bool()
         labels_flow = labels[:rest].clone().to(dtype=torch.long)
-        labels_flow[drop] = int(cfg.runtime_cfg.num_classes)
+        labels_flow[drop] = cfg.runtime_cfg.num_classes if cfg.runtime_cfg.num_classes > 1 else 0
 
         x_t_out = torch.cat([bst_xt, x_t_flow], 0)
         v_t_out = torch.cat([bst_v, v_t_flow], 0)

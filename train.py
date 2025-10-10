@@ -164,7 +164,6 @@ def main():
     dit = DiT(
         **params,
         in_channels=C,
-        class_dropout_prob=model_cfg.class_dropout_prob,
         num_classes=runtime_cfg.num_classes,
         mlp_ratio=model_cfg.mlp_ratio,
         ignore_k=(model_cfg.train_type not in ("shortcut", "livereflow")),
@@ -396,7 +395,7 @@ def main():
         #        teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
 
         # eval
-        if (step % runtime_cfg.eval_interval) == 0 and rank == 0:
+        if (step % runtime_cfg.eval_interval) == 0 and rank == 0 or step == 1:
             print("================= evaluating =================")
             if (not is_ddp) or rank == 0:
                 validate(cfg,

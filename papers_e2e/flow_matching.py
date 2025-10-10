@@ -34,7 +34,7 @@ def get_targets(cfg, gen, images, labels, call_model=None, step=None, force_t: f
 
     # label dropout for CFG
     mask = torch.bernoulli(torch.full((B,), cfg.model_cfg.class_dropout_prob, device=device)).bool()
-    labels_dropped = torch.where(mask, torch.full_like(labels, cfg.runtime_cfg.num_classes), labels)
+    labels_dropped = torch.where(mask, torch.full_like(labels, cfg.runtime_cfg.num_classes if cfg.runtime_cfg.num_classes > 1 else 0), labels)
 
     # t in [0,1]
     # Beta(2,2) via Kumaraswamy, with your RNG 'gen'
