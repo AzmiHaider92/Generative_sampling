@@ -1,9 +1,11 @@
 import torch
 import math
 
+EPS = 1e-5  # endpoint epsilon for the linear path
+
 
 @torch.no_grad()
-def get_targets(cfg, gen, images, labels):
+def get_targets(cfg, gen, images, labels, call_model, step, force_t: float = -1, force_dt: float = -1):
     # Returns
     # ------------------------------------------------------------------------------------------------------------------
     # x_t: torch.Tensor, shapelike x0 / x1 Interpolated point between x0 and x1 at time t:
@@ -46,7 +48,7 @@ def get_targets(cfg, gen, images, labels):
     x1 = images
     x0 = torch.randn(images.shape, dtype=images.dtype, device=images.device, generator=gen)
 
-    x_t = (1.0 - t_full) * x0 + t_full * x1
+    x_t = (1.0 - (1.0 - EPS) * t_full) * x0 + t_full * x1
     v_t = x1 - x0
 
     T = int(cfg.model_cfg.denoise_timesteps)

@@ -236,15 +236,12 @@ def main():
             if (not is_ddp) or rank == 0:
                 print(f"[load] no checkpoint found at {ckpt_path}")
 
-    # ----- targets dispatcher -----
+    # ----- get targets (method= fm / shortcut / ... ) -----
     def import_targets(train_type: str):
         name = {
-            "flow_matching": "baselines.targets_flow_matching",
-            "shortcut": "baselines.targets_shortcut",
-            #"progressive": "targets_progressive",
-            #"consistency-distillation": "targets_consistency_distillation",
-            #"consistency": "targets_consistency_training",
-            #"livereflow": "targets_livereflow",
+            "flow_matching": "papers_e2e.flow_matching",
+            "consistency": "papers_e2e.consistency",
+            "shortcut": "papers_e2e.shortcut",
         }[train_type]
         return importlib.import_module(name).get_targets
     get_targets = import_targets(model_cfg.train_type)
@@ -266,14 +263,14 @@ def main():
         m = ema_model if use_ema else (dit.module if is_ddp else dit)
         return _forward_model(m, x_t, t, k, labels)
 
-    @torch.no_grad()
-    def call_model_teacher(x_t, t, k, labels, use_ema: bool = True):
-        m = teacher_model if (teacher_model is not None) else ema_model
-        return _forward_model(m, x_t, t, k, labels)
+    #@torch.no_grad()
+    #def call_model_teacher(x_t, t, k, labels):
+    #    m = teacher_model if (teacher_model is not None) else ema_model
+    #    return _forward_model(m, x_t, t, k, labels)
 
-    @torch.no_grad()
-    def call_model_student_ema(x_t, t, k, labels, use_ema: bool = True):
-        return _forward_model(ema_model, x_t, t, k, labels)
+    #@torch.no_grad()
+    #def call_model_student_ema(x_t, t, k, labels):
+    #    return _forward_model(ema_model, x_t, t, k, labels)
 
     cfg = CFG(runtime_cfg=runtime_cfg, model_cfg=model_cfg, wandb_cfg=wandb_cfg)
 
@@ -318,15 +315,15 @@ def main():
 
         # targets per train_type
         if model_cfg.train_type == 'flow_matching':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels)
+            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
+        elif model_cfg.train_type == 'consistency':
+            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
         elif model_cfg.train_type == 'shortcut':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model)
+            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
         #elif model_cfg.train_type == 'progressive':
         #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, batch_images, batch_labels, step=step)
         #elif model_cfg.train_type == 'consistency-distillation':
         #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, call_model_student_ema, batch_images, batch_labels)
-        #elif model_cfg.train_type == 'consistency':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_student_ema, batch_images, batch_labels)
         #elif model_cfg.train_type == 'livereflow':
         #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
         else:

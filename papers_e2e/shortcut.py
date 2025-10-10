@@ -3,6 +3,11 @@ import torch
 
 EPS = 1e-5  # endpoint epsilon for the linear path
 
+"""
+Implementation of the paper: One Step Diffusion via Shortcut Models
+https://arxiv.org/abs/2410.12557
+"""
+
 
 @torch.no_grad()
 def _build_k_bins(bootstrap_size: int, K: int, device, bias: int):
@@ -51,6 +56,12 @@ def sample_dt_t_bins(bootstrap_size: int, denoise_timesteps: int, device, gen, b
       k_code, k_teacher_code        (B_b,) float  (level codes for student/teacher)
       t                              (B_b,) float
       num_dt_cfg                     int
+
+    # example: denoise_timesteps = 128, bootstrap_size=8
+    # K=log(128) = 7, levels k -{6,5,4,3,2,1,0,0},
+    # for each level k => dt=2^-k and t ∈ {0,dt,2dt,…,1−dt}
+    # for example: ki=6 => dt = 1/64 and t ∈ {1/64, 2/64, 3/64, ...., 63/64}
+    #
     """
     K = int(math.log2(int(denoise_timesteps)))
     k_long, num_dt_cfg = _build_k_bins(bootstrap_size, K, device, bias)
@@ -135,7 +146,7 @@ def sample_dt_t_uniform(bootstrap_size: int, denoise_timesteps: int, device, gen
 
 
 @torch.no_grad()
-def get_targets(cfg, gen, images, labels, call_model, force_t: float = -1, force_dt: float = -1):
+def get_targets(cfg, gen, images, labels, call_model, step, force_t: float = -1, force_dt: float = -1):
     """
     Supports two (k,t) sampling schemes:
       - dt_mode='bins'          : discrete dyadic levels + grid-aligned t
@@ -195,7 +206,7 @@ def get_targets(cfg, gen, images, labels, call_model, force_t: float = -1, force
         x_t = (1.0 - (1.0 - EPS) * t_full) * x0 + t_full * x1
         b_labels = labels[:bootstrap_size].to(dtype=torch.long)
 
-        use_ema = bool(cfg.model_cfg.bootstrap_ema)
+        use_ema = True # use the ema to produce teacher targets
         if not cfg.model_cfg.bootstrap_cfg:
             v_b1 = call_model(x_t, t, k_teacher_code, b_labels, use_ema=use_ema)
             x_t2 = torch.clamp(x_t + dt_half.view(-1, 1, 1, 1) * v_b1, -4, 4)

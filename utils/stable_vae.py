@@ -5,7 +5,7 @@ from diffusers import AutoencoderKL
 # code edited to receive  BCHW (instead of BHWC)
 class StableVAE:
     def __init__(self, device):
-        self.vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(device)
+        self.vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
         self.device = device
         self.scaling_factor = 0.18215
         self.vae.eval()

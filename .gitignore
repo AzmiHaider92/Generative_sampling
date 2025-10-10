@@ -7,7 +7,6 @@ log/
 data/
 configs/
 wandb/
-environment.yml
 utils/__pycache__
 __pycache__/
 .idea/
