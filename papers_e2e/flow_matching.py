@@ -5,7 +5,7 @@ EPS = 1e-5  # endpoint epsilon for the linear path
 
 
 @torch.no_grad()
-def get_targets(cfg, gen, images, labels, call_model, step, force_t: float = -1, force_dt: float = -1):
+def get_targets(cfg, gen, images, labels, call_model=None, step=None, force_t: float = -1, force_dt: float = -1):
     # Returns
     # ------------------------------------------------------------------------------------------------------------------
     # x_t: torch.Tensor, shapelike x0 / x1 Interpolated point between x0 and x1 at time t:
