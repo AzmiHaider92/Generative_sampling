@@ -1,18 +1,40 @@
-import os, math, glob
-from typing import Iterator, Tuple, List
-from PIL import Image
+import os, glob, random, warnings
+from typing import Iterator, Tuple, List, Optional
+from PIL import Image, ImageFile
 
 import torch
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, RandomSampler, SequentialSampler
 from torchvision import transforms
 
-# ---------- tiny dataset helper ----------
-class FlatImageFolder(Dataset):
+# --- make PIL robust to truncated files ---
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+warnings.filterwarnings("ignore", category=UserWarning, module="PIL")
+
+# --- use filesystem sharing to avoid /dev/shm pressure ---
+try:
+    torch.multiprocessing.set_sharing_strategy("file_system")
+except RuntimeError:
+    pass
+
+def _build_transform(image_size: int):
+    return transforms.Compose([
+        transforms.Resize(image_size, antialias=True),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5, 0.5, 0.5],[0.5, 0.5, 0.5]),
+    ])
+
+class FlatImageFolderSafe(Dataset):
+    """
+    CelebA-style flat folder with robust __getitem__ that
+    skips unreadable images instead of crashing a worker.
+    """
     def __init__(self, root: str, image_size: int, debug_overfit: int = 0):
         exts = ("*.jpg", "*.jpeg", "*.png", "*.webp", "*.bmp")
         files: List[str] = []
         for ext in exts:
             files.extend(glob.glob(os.path.join(root, "**", ext), recursive=True))
+        files = sorted(files)
         if not files:
             raise FileNotFoundError(f"No images found under: {root}")
 
@@ -20,45 +42,72 @@ class FlatImageFolder(Dataset):
             files = files[:debug_overfit]
 
         self.files = files
-        self.transform = transforms.Compose([
-            transforms.Resize(image_size, antialias=True),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),  # [0,1]
-            transforms.Normalize([0.5, 0.5, 0.5],[0.5, 0.5, 0.5]),  # -> [-1,1]
-        ])
+        self.T = _build_transform(image_size)
+        # optional quick filter pass (cheap) — drop zero-byte files
+        self.files = [f for f in self.files if (os.path.getsize(f) > 0)]
 
-    def __len__(self): return len(self.files)
+    def __len__(self):
+        return len(self.files)
+
+    def _safe_load(self, path: str) -> Optional[torch.Tensor]:
+        # return None on failure instead of raising
+        try:
+            with Image.open(path) as im:
+                im = im.convert("RGB")
+            return self.T(im)  # CHW in [-1,1]
+        except Exception:
+            return None
 
     def __getitem__(self, idx):
+        # Try the requested index; if bad, try a few random fallbacks
         path = self.files[idx]
-        with Image.open(path) as im:
-            im = im.convert("RGB")
-        x = self.transform(im)                     # CHW in [-1,1]
-        y = 0                                      # dummy label (no classes)
+        x = self._safe_load(path)
+        if x is None:
+            for _ in range(3):
+                alt = self.files[random.randrange(0, len(self.files))]
+                x = self._safe_load(alt)
+                if x is not None:
+                    break
+        if x is None:
+            # As a last resort, return a dummy (keeps batch shapes aligned)
+            x = torch.zeros(3, self.T.transforms[1].size, self.T.transforms[1].size)
+        y = 0
         return x, y
 
+def _collate_drop_none(batch):
+    # Our loader never returns None now, but if you add skipping logic later, this keeps things safe.
+    batch = [(x, y) for (x, y) in batch if x is not None]
+    xs = torch.stack([x for x, _ in batch], dim=0)
+    ys = torch.tensor([y for _, y in batch], dtype=torch.long)
+    return xs, ys
 
-# ---------- main iterator ----------
+
 def _get_celeba_iter(root: str, per_rank_bs: int, train: bool, debug_overfit: int, image_size: int) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
     world = int(os.environ.get("WORLD_SIZE", "1"))
     rank  = int(os.environ.get("RANK", "0"))
     print(f"[rank {rank}] per_rank_bs={per_rank_bs}  global_bs={per_rank_bs * world}")
 
-    dataset = FlatImageFolder(root=root, image_size=image_size, debug_overfit=debug_overfit)
+    dataset = FlatImageFolderSafe(root=root, image_size=image_size, debug_overfit=debug_overfit)
 
     if world > 1:
-        sampler = DistributedSampler(dataset, num_replicas=world, rank=rank, shuffle=train, drop_last=False)
+        # drop_last=True ensures identical iteration counts across ranks
+        sampler = DistributedSampler(dataset, num_replicas=world, rank=rank, shuffle=train, drop_last=True)
     else:
         sampler = RandomSampler(dataset) if train else SequentialSampler(dataset)
 
+    # Conservative worker settings for flat tiny-file datasets
+    num_workers = 0 if os.name == "nt" else 2
     loader = DataLoader(
         dataset,
         batch_size=per_rank_bs,
         sampler=sampler,
-        num_workers=4,
-        pin_memory=True,
-        drop_last=False,
-        persistent_workers=(4 > 0),
+        num_workers=num_workers,
+        pin_memory=True,             # OK; reduces H2D latency
+        prefetch_factor=2,           # keep small for SHM
+        persistent_workers=False,    # avoids long-lived SHM usage
+        collate_fn=_collate_drop_none,
+        multiprocessing_context="forkserver",  # more robust than 'fork' on many clusters
+        drop_last=True,              # align steps across ranks
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -66,24 +115,13 @@ def _get_celeba_iter(root: str, per_rank_bs: int, train: bool, debug_overfit: in
     def _iter():
         epoch = 0
         while True:
-            # For DDP: ensure different order each epoch
             if isinstance(sampler, DistributedSampler):
                 sampler.set_epoch(epoch)
 
             for x_chw, y in loader:
-                x_chw = x_chw.to(device, non_blocking=True)     # [B,C,H,W] in [-1,1]
-
-                # keep dtype long for downstream "class index" paths
-                if not torch.is_tensor(y):
-                    y = torch.zeros(x_chw.size(0), dtype=torch.long)
+                x_chw = x_chw.to(device, non_blocking=True)
                 y = y.to(device, non_blocking=True).long()
-
-                # If your model expects BHWC, uncomment the next line:
-                # x_bhwc = x_chw.permute(0, 2, 3, 1).contiguous()
-                # yield x_bhwc, y
-
-                yield x_chw, y  # CHW
-
-            epoch += 1  # next epoch (keeps iterator infinite)
+                yield x_chw, y
+            epoch += 1
 
     return _iter()
