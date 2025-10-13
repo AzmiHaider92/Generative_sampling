@@ -226,9 +226,10 @@ def inference(
     def call_model(x_bchw, t_vec, k, labels):
         return ema_model(x_bchw, t_vec, k, labels, train=False)
 
-    T = int(cfg.model_cfg.denoise_timesteps)
-    K = int(math.log2(T))  # max level
+    #T = int(cfg.model_cfg.denoise_timesteps)
+    #K = int(math.log2(T))  # max level
     denoise_T = cfg.runtime_cfg.inference_timesteps
+    K = int(math.log2(denoise_T))
     dt = 1.0 / denoise_T
     cfg_scale = cfg.runtime_cfg.inference_cfg_scale
 
@@ -254,7 +255,7 @@ def inference(
 
         # Euler sampling with CFG
         for ti in range(denoise_T):
-            t = (ti + 0.5) / denoise_T
+            t = ti / denoise_T
             t_vec = torch.full((B,), t, device=device, dtype=torch.float32)
 
             if cfg_scale == 0:
@@ -297,6 +298,7 @@ def inference(
             torch.cuda.synchronize()
             with torch.amp.autocast('cuda', enabled=False):
                 fid_score = fid.compute().item()
+                print(f"FID: {fid_score:.4f}")
             torch.cuda.synchronize()
             if hasattr(wandb, "log") and wandb.run is not None:
                 wandb.log({"metrics/FID": fid_score})
