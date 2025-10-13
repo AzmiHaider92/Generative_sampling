@@ -249,7 +249,7 @@ def inference(
 
         # fresh labels & noise
         labels = torch.randint(0, cfg.runtime_cfg.num_classes, (B,), device=device, dtype=torch.long, generator=gen)
-        labels_uncond = torch.full_like(labels, cfg.runtime_cfg.num_classes)
+        labels_uncond = torch.full_like(labels, cfg.runtime_cfg.num_classes if cfg.runtime_cfg.num_classes > 1 else 0)
         x = torch.randn(images_shape, device=device, generator=gen)  # keep BHWC shape
 
         # Euler sampling with CFG
