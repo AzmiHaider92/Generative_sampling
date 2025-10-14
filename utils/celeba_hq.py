@@ -16,6 +16,16 @@ try:
 except RuntimeError:
     pass
 
+
+def _seed_worker(worker_id):
+    seed = torch.initial_seed() % 2**32
+    random.seed(seed)
+    try:
+        import numpy as np; np.random.seed(seed)
+    except Exception:
+        pass
+
+
 def _build_transform(image_size: int):
     return transforms.Compose([
         transforms.Resize(image_size, antialias=True),
@@ -23,6 +33,7 @@ def _build_transform(image_size: int):
         transforms.ToTensor(),
         transforms.Normalize([0.5, 0.5, 0.5],[0.5, 0.5, 0.5]),
     ])
+
 
 class FlatImageFolderSafe(Dataset):
     """
@@ -100,14 +111,13 @@ def _get_celeba_iter(root: str, per_rank_bs: int, train: bool, debug_overfit: in
     loader = DataLoader(
         dataset,
         batch_size=per_rank_bs,
-        sampler=sampler,
+        shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,             # OK; reduces H2D latency
-        prefetch_factor=2,           # keep small for SHM
-        persistent_workers=False,    # avoids long-lived SHM usage
-        collate_fn=_collate_drop_none,
-        multiprocessing_context="forkserver",  # more robust than 'fork' on many clusters
-        drop_last=True,              # align steps across ranks
+        pin_memory=(torch.cuda.is_available() and num_workers > 0),
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=(2 if num_workers > 0 else None),
+        drop_last=True,
+        worker_init_fn=_seed_worker if num_workers > 0 else None,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
