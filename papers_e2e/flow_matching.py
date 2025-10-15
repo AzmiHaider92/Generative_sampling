@@ -36,12 +36,21 @@ def get_targets(cfg, gen, images, labels, call_model=None, step=None, force_t: f
     mask = torch.bernoulli(torch.full((B,), cfg.model_cfg.class_dropout_prob, device=device)).bool()
     labels_dropped = torch.where(mask, torch.full_like(labels, cfg.runtime_cfg.num_classes if cfg.runtime_cfg.num_classes > 1 else 0), labels)
 
+    T = int(cfg.model_cfg.denoise_timesteps)
+    K = int(math.log2(T))  # scalar max level
+    k = torch.full((B,), float(K), device=device, dtype=torch.float32)  # per-sample level code (sentinel)
+
     # t in [0,1]
     # Beta(2,2) via Kumaraswamy, with your RNG 'gen'
     rho = 2.0
     u = torch.rand(B, device=device, generator=gen)
     t = (1 - (1 - u).pow(1 / rho)).pow(1 / rho)
-    t = t.clamp(0.02, 0.98)
+    #t = t.clamp(0.02, 0.98)
+
+    # Bins t in {1,1/2,1/3, ..., 1/128}
+    #t = torch.randint(low=0, high=T, size=(B,), device=device, generator=gen)
+    #t = t / float(T)
+
     t_full = t.view(B, 1, 1, 1)
 
     # flow pairs
@@ -51,7 +60,4 @@ def get_targets(cfg, gen, images, labels, call_model=None, step=None, force_t: f
     x_t = (1.0 - (1.0 - EPS) * t_full) * x0 + t_full * x1
     v_t = x1 - x0
 
-    T = int(cfg.model_cfg.denoise_timesteps)
-    K = int(math.log2(T))  # scalar max level
-    k = torch.full((B,), float(K), device=device, dtype=torch.float32)  # per-sample level code (sentinel)
     return x_t, v_t, t, k, labels_dropped, None

@@ -51,7 +51,7 @@ class ModelCfg:
 @dataclass
 class WandbCfg:
     project: str = "Generative_sampling"
-    name: str = "{model_name}_{dataset_name}"
+    name: str = "{model_name}_{dt_mode}_{dataset_name}"
     run_id: str = "None"
     mode: str = "online"  # or "disabled"
 

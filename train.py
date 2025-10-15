@@ -126,7 +126,7 @@ def main():
     if (not is_ddp) or rank == 0:
         # timestamped run name
         ts = datetime.now().strftime("M%m-D%d-H%H_M%M")
-        base_name = wandb_cfg.name.format(train_type=model_cfg.train_type, dataset_name=runtime_cfg.dataset_name)
+        base_name = wandb_cfg.name.format(train_type=model_cfg.train_type, dt_mode=model_cfg.dt_mode, dataset_name=runtime_cfg.dataset_name)
         run_name = f"{base_name}_{ts}"
         runtime_cfg.save_dir = os.path.join(runtime_cfg.save_dir, run_name)
         os.makedirs(runtime_cfg.save_dir, exist_ok=True)
