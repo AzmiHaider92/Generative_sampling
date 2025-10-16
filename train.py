@@ -9,11 +9,15 @@ from torch.amp import autocast, GradScaler
 import wandb
 from tqdm import tqdm
 
-from DiT.meta_model import DiT
-from DiT.model_config import get_dit_params
+from models.meta_model import DiT
+from models.model_config import get_dit_params
 from arguments_parser import RuntimeCfg, ModelCfg, WandbCfg, load_configs_from_file, parse_args, CFG
 import importlib
 import time
+
+from models.opt import optimizer, mean_dit_lr, get_group_lr, step_two_schedulers
+from models.time_warper import TimeWarpPL
+from papers_e2e.shortcut_twarper import sample_dt_t_warp
 from utils.datasets import get_dataset as get_dataset_iter
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from utils.sharding import ddp_setup
@@ -27,11 +31,25 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
+amp_dtype = torch.bfloat16  # match original-style BF16
+
 try:
     if torch.multiprocessing.get_start_method(allow_none=True) != "spawn":
         torch.multiprocessing.set_start_method("spawn", force=True)
 except RuntimeError:
     pass  # already set
+
+
+# ----- get targets (method= fm / shortcut / ... ) -----
+def import_targets(train_type: str):
+    name = {
+            "flow_matching": "papers_e2e.flow_matching",
+            "consistency": "papers_e2e.consistency",
+            "shortcut": "papers_e2e.shortcut",
+            "twarper": "papers_e2e.shortcut_twarper",
+            "mbootstraps": "papers_e2e.shortcut_mbootstraps",
+        }[train_type]
+    return importlib.import_module(name).get_targets
 
 
 # ---------------- Utils ----------------
@@ -41,29 +59,6 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.backends.cudnn.benchmark = True
     torch.set_float32_matmul_precision("high")
-
-
-class WarmupCosine:
-    def __init__(self, base_lr: float, warmup_steps: int, total_steps: int):
-        self.base_lr = base_lr
-        self.warmup = warmup_steps
-        self.total = max(total_steps, warmup_steps + 1)
-
-    def __call__(self, step: int) -> float:
-        if step < self.warmup:
-            return self.base_lr * step / max(1, self.warmup)
-        progress = (step - self.warmup) / (self.total - self.warmup)
-        return 0.5 * self.base_lr * (1.0 + math.cos(math.pi * progress))
-
-
-class LinearWarmup:
-    def __init__(self, base_lr: float, warmup_steps: int):
-        self.base_lr = base_lr
-        self.warmup = warmup_steps
-    def __call__(self, step: int) -> float:
-        if step < self.warmup:
-            return self.base_lr * step / max(1, self.warmup)
-        return self.base_lr
 
 
 def print_gpu_info(rank=0, world_size=1, local_rank=0):
@@ -145,6 +140,14 @@ def main():
                 "batch_size_per_rank": per_rank_bs},
         )
 
+    # ----- target function based on method type -----
+    try:
+        get_targets = import_targets(model_cfg.train_type)
+        print(f"[method] {model_cfg.train_type}")
+    except:
+        print(f"[method] {model_cfg.train_type} is not implemented")
+        return
+
     # ----- VAE (optional) -----
     vae = None
     if model_cfg.use_stable_vae:
@@ -159,7 +162,8 @@ def main():
     example_images = maybe_encode(example_images)
     C, H = example_images.shape[1], example_images.shape[-1]
 
-    # ----- model -----
+    # ----- models -----
+    cfg = CFG(runtime_cfg=runtime_cfg, model_cfg=model_cfg, wandb_cfg=wandb_cfg)
     params = get_dit_params(model_id=model_cfg.model_id)
     dit = DiT(
         **params,
@@ -170,64 +174,46 @@ def main():
         image_size=H,
     ).to(device)
 
+    twarper = None
+    if model_cfg.dt_mode == "twarper":
+        twarper = TimeWarpPL().to(device)
+
     if is_ddp:
         dit = torch.nn.parallel.DistributedDataParallel(
             dit, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
         )
+        if twarper is not None:
+            twarper = torch.nn.parallel.DistributedDataParallel(
+                twarper, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
+            )
 
-    live_model = dit.module if is_ddp else dit
+    # DDP-wrapped or plain:
+    live_dit = dit.module if is_ddp else dit
+    live_twarper = twarper.module if (is_ddp and twarper is not None) else twarper
 
     # EMA model: deep copy + move to device
-    ema_model = None
+    ema_dit = None
+    ema_twarper = None
     ema_t = None
     EMA_DECAY = 0.9999
     if model_cfg.use_ema:
-        ema_model = copy.deepcopy(live_model).to(device)
-        ema_model.eval()
-        for p in ema_model.parameters(): p.data = p.data.float(); p.requires_grad_(False)
-
-    teacher_model = None
-    if model_cfg.train_type in ("progressive", "consistency-distillation"):
-        # copy current weights
-        teacher_model = copy.deepcopy(live_model).to(device)
-        teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
+        ema_dit = copy.deepcopy(live_dit).to(device)
+        ema_dit.eval()
+        for p in ema_dit.parameters(): p.data = p.data.float(); p.requires_grad_(False)
+        if live_twarper is not None:
+            ema_twarper = copy.deepcopy(live_twarper).to(device)
+            ema_twarper.eval()
+            for p in ema_twarper.parameters(): p.data = p.data.float(); p.requires_grad_(False)
 
     # ----- opt + sched -----
-    base_lr = model_cfg.lr
-    warmup = model_cfg.warmup
-    min_lr = 0.1 * base_lr
-
-    def param_groups(m: nn.Module, wd: float):
-        decay, no_decay = [], []
-        skip = ("bias", "pos_embed", "cls_token", "time_embed", "label_embed", "embed", "norm", "ln")
-        for n, p in m.named_parameters():
-            if not p.requires_grad:
-                continue
-            if p.ndim == 1 or any(s in n.lower() for s in skip):
-                no_decay.append(p)  # norm/embeds/bias -> no WD
-            else:
-                decay.append(p)  # linear/conv weights -> WD
-        return [{"params": decay, "weight_decay": wd},
-                {"params": no_decay, "weight_decay": 0.0}]
-
-    def lr_sched(step):
-        # linear warmup -> cosine decay to min_lr
-        if step < warmup:
-            return base_lr * (step / max(1, warmup))
-        t = (step - warmup) / max(1, runtime_cfg.max_steps - warmup)
-        return min_lr + 0.5 * (base_lr - min_lr) * (1 + math.cos(math.pi * t))
-
-    opt = torch.optim.AdamW(param_groups(dit, wd=0.05), lr=base_lr, betas=(0.9, 0.95), eps=1e-8, fused=True)
-
-    amp_dtype = torch.bfloat16  # match original-style BF16
-    #    scaler = GradScaler('cuda', enabled=(amp_dtype is torch.float16))
+    opt, t_opt = optimizer(cfg, live_dit, live_twarper)
 
     # ----- checkpoint load -----
     global_step = 0
     if runtime_cfg.load_dir:
         ckpt_path = runtime_cfg.load_dir if runtime_cfg.load_dir.endswith(".pt") else os.path.join(runtime_cfg.load_dir, "model.pt")
         try:
-            step = load_checkpoint(ckpt_path, live_model, opt, ema=ema_model, map_location=device)
+            step = load_checkpoint(ckpt_path, live_dit, opt, ema=ema_dit, t_ema=ema_twarper, map_location=device)
             global_step = int(step)
             if (not is_ddp) or rank == 0:
                 print(f"[load] restored step={global_step} from {ckpt_path}")
@@ -235,19 +221,10 @@ def main():
             if (not is_ddp) or rank == 0:
                 print(f"[load] no checkpoint found at {ckpt_path}")
 
-    # ----- get targets (method= fm / shortcut / ... ) -----
-    def import_targets(train_type: str):
-        name = {
-            "flow_matching": "papers_e2e.flow_matching",
-            "consistency": "papers_e2e.consistency",
-            "shortcut": "papers_e2e.shortcut",
-        }[train_type]
-        return importlib.import_module(name).get_targets
-    get_targets = import_targets(model_cfg.train_type)
-
     # ----- model wrappers -----
     @torch.no_grad()
-    def _forward_model(m, x_t, t, k, labels):
+    def call_teacher_model(x_t, t, k, labels, use_ema: bool = False):
+        m = ema_dit if use_ema else (dit.module if is_ddp else dit)
         dev = next(m.parameters()).device
         # move inputs to the model's device
         x_t = x_t.to(dev, non_blocking=True)
@@ -257,37 +234,18 @@ def main():
         v_pred = m(x_t, t, k, labels, train=False)
         return v_pred
 
-    @torch.no_grad()
-    def call_model(x_t, t, k, labels, use_ema: bool = False):
-        m = ema_model if use_ema else (dit.module if is_ddp else dit)
-        return _forward_model(m, x_t, t, k, labels)
-
-    #@torch.no_grad()
-    #def call_model_teacher(x_t, t, k, labels):
-    #    m = teacher_model if (teacher_model is not None) else ema_model
-    #    return _forward_model(m, x_t, t, k, labels)
-
-    #@torch.no_grad()
-    #def call_model_student_ema(x_t, t, k, labels):
-    #    return _forward_model(ema_model, x_t, t, k, labels)
-
-    cfg = CFG(runtime_cfg=runtime_cfg, model_cfg=model_cfg, wandb_cfg=wandb_cfg)
-
     # ----- eval/infer early exit -----
     if runtime_cfg.mode != "train":
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
         inference(cfg,
-                     ema_model,
+                     ema_dit,
                      vae=vae,
                      num_generations=runtime_cfg.inference_num_generations,
                      fid_stats_path=runtime_cfg.fid_stats)
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
         return
-
-    # ----- training loop -----
-    gen = torch.Generator(device=device).manual_seed(runtime_cfg.seed)
 
     ################################################################################################################
     #  _             _
@@ -305,6 +263,7 @@ def main():
     accum_steps = 1  # set >1 if you use gradient accumulation
     pbar = tqdm(total=runtime_cfg.max_steps + 1, dynamic_ncols=True)
     step, max_steps = global_step+1, runtime_cfg.max_steps + 1  # e.g., 8001
+    gen = torch.Generator(device=device).manual_seed(runtime_cfg.seed)
 
     while step < max_steps:
         t0 = time.time()
@@ -314,40 +273,50 @@ def main():
 
         # targets per train_type
         if model_cfg.train_type == 'flow_matching':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
+            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels)
         elif model_cfg.train_type == 'consistency':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
+            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_teacher_model,
+                                                                   step)
         elif model_cfg.train_type == 'shortcut':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
-        #elif model_cfg.train_type == 'progressive':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, batch_images, batch_labels, step=step)
-        #elif model_cfg.train_type == 'consistency-distillation':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, call_model_student_ema, batch_images, batch_labels)
-        #elif model_cfg.train_type == 'livereflow':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
+            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_teacher_model,
+                                                                   step)
+        elif model_cfg.train_type == 'twarper':
+            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels,
+                                                                   call_teacher_model,
+                                                                   step, twarper)
+
         else:
             raise ValueError(f"Unknown train_type: {model_cfg.train_type}")
 
-        # forward + loss
-        opt.zero_grad(set_to_none=True)
+        # forward + loss + backward + opt
+        if opt is not None:
+            opt.zero_grad(set_to_none=True)
+        if t_opt is not None:
+            t_opt.zero_grad(set_to_none=True)
         with autocast('cuda', dtype=amp_dtype):
             v_pred = (dit)(x_t, t_vec, k_vec, labels_eff, train=True)
             mse = (v_pred - v_t).float().pow(2).mean(dim=(1, 2, 3))
             loss = mse.mean()
 
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0)
-        opt.step()
+
+        if opt is not None: # training dit
+            torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0)
+            opt.step()
+        if t_opt is not None: # training twarper
+            t_opt.step()
+        # scheduler update
+        step_two_schedulers(step + 1, opt, t_opt)  # update LRs after stepping
 
         # EMA update
-        if ema_model is not None:
+        if ema_dit is not None:
             with torch.no_grad():
-                for p_ema, p in zip(ema_model.parameters(), (dit.module if is_ddp else dit).parameters()):
+                for p_ema, p in zip(ema_dit.parameters(), (dit.module if is_ddp else dit).parameters()):
                     p_ema.data.mul_(EMA_DECAY).add_(p.data.float(), alpha=1 - EMA_DECAY)  # keep EMA in fp32
-
-        # log (every log_interval)
-        lr = lr_sched(step)
-        for g in opt.param_groups: g['lr'] = lr
+        if ema_twarper is not None:
+            with torch.no_grad():
+                for p_ema, p in zip(ema_twarper.parameters(), (twarper.module if is_ddp else twarper).parameters()):
+                    p_ema.data.mul_(EMA_DECAY).add_(p.data.float(), alpha=1 - EMA_DECAY)  # keep EMA in fp32
 
         if (step % runtime_cfg.log_interval) == 0:
             # cheap scalars on every rank, averaged like JAX
@@ -368,39 +337,27 @@ def main():
                 vlbl = vlbl.to(device, non_blocking=True)
 
                 with torch.inference_mode(), autocast('cuda', dtype=amp_dtype):
-                    #if model_cfg.train_type in ("flow_matching", "shortcut", "livereflow"):
-                    v_x_t, v_v_t, v_t_vec, v_k_vec, v_lbl, _ = get_targets(cfg, gen, vimg, vlbl, call_model, step)
-                    #elif model_cfg.train_type == "progressive":
-                    #    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_teacher, vimg, vlbl,
-                    #                                                        step=step)
-                    #else:  # "consistency" / "consistency-distillation"
-                    #    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_student_ema, vimg,
-                    #                                                        vlbl)
-
+                    v_x_t, v_v_t, v_t_vec, v_k_vec, v_lbl, _ = get_targets(cfg, gen, vimg, vlbl, call_teacher_model, step)
                     v_pred2 = dit(v_x_t, v_t_vec, v_k_vec, v_lbl, train=False)
                     v_loss = ((v_pred2 - v_v_t).pow(2).mean(dim=(1, 2, 3))).mean().item()
+
+                lr_dit_mean = mean_dit_lr(opt)  # None if DiT is frozen or absent
+                lr_warp = get_group_lr(opt, "time_warper")  # None if no warper
 
                 wandb.log({
                     "training/loss": train_loss_mean,
                     "training/v_magnitude_prime": vmag_mean,
-                    "training/lr": lr,
+                    "training/lr": lr_dit_mean,
+                    "training/t_lr": lr_warp,
                     "training/loss_valid": v_loss,
                 }, step=step)
 
-
-        # progressive: refresh teacher
-        #if model_cfg.train_type == 'progressive':
-        #    num_sections = int(math.log2(model_cfg.denoise_timesteps))
-        #    if step % max(1, (runtime_cfg.max_steps // max(1, num_sections))) == 0 and teacher_model is not None:
-        #        teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
-
         # eval
-        if ((step % runtime_cfg.eval_interval) == 0 or step == 1) and rank == 0 :
-            print("================= evaluating =================")
+        if ((step % runtime_cfg.eval_interval) == 0 or step == 1) and rank == 0:
+            print("================= validate =================")
             if (not is_ddp) or rank == 0:
                 validate(cfg,
-                             ema_model,
-                             # pass a real ema_model if you keep a separate module
+                             ema_dit,
                              dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                            per_rank_bs, True, runtime_cfg.debug_overfit),
                              vae=vae,
@@ -412,7 +369,8 @@ def main():
             if (not is_ddp) or rank == 0:
                 os.makedirs(runtime_cfg.save_dir, exist_ok=True)
                 ckpt_path = os.path.join(runtime_cfg.save_dir, f"model_step_{step}.pt")
-                save_checkpoint(ckpt_path, dit.module if is_ddp else dit, opt, step=step, ema=ema_model)
+                save_checkpoint(ckpt_path, dit, twarper, opt, t_opt, ema_dit, ema_twarper, step=step)
+
                 print(f"[save] {ckpt_path}")
 
         # update bar
@@ -432,7 +390,7 @@ def main():
 
     fid = inference(                       # or do_inference_fid_ddp(...
             cfg,
-            ema_model,
+            ema_dit,
             vae=vae,
             num_generations=50000,  # total across ALL GPUs
             fid_stats_path=runtime_cfg.fid_stats

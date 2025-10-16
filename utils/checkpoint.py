@@ -1,53 +1,81 @@
 import os, torch
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-def save_checkpoint(path, model, optimizer=None, step=None, ema=None, extra: dict=None):
-    d = os.path.dirname(path)
-    if d: os.makedirs(d, exist_ok=True)
 
-    state = {"model": model.state_dict()}
-    if optimizer is not None:
-        state["optimizer"] = optimizer.state_dict()
-    if step is not None:
-        state["step"] = int(step)
-    if extra:
-        state["extra"] = extra
+# --- helpers ---
+def _live(m):  # unwrap DDP if needed
+    return m.module if isinstance(m, DDP) else m
 
-    # ---- EMA (handle multiple implementations) ----
+
+def _safe_load_opt(opt, state, name="opt"):
+    if opt is None or state is None:
+        return False
+    try:
+        opt.load_state_dict(state)
+        return True
+    except Exception as e:
+        print(f"[ckpt] skip loading {name}: {e}")
+        return False
+
+
+# ========== SAVE ==========
+def save_checkpoint(path, model, t_model=None, optimizer=None, t_optimizer=None,
+              ema=None, t_ema=None, step=None, extra: dict=None):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    m  = _live(model)
+    tm = _live(t_model) if t_model is not None else None
+
+    state = {"schema": "compat-v1"}
+    state["model"]   = m.state_dict()
+    if tm is not None:
+        state["t_model"] = tm.state_dict()
+
     if ema is not None:
-        if hasattr(ema, "state_dict"):               # e.g., torch_ema.ExponentialMovingAverage or nn.Module
-            state["ema"] = ema.state_dict()
-            state["ema_format"] = "state_dict"
-        elif isinstance(ema, torch.nn.Module):       # separate EMA model
-            state["ema"] = ema.state_dict()
-            state["ema_format"] = "module_state_dict"
-        elif hasattr(ema, "shadow"):                 # old custom wrappers storing a dict of tensors
-            state["ema"] = ema.shadow
-            state["ema_format"] = "shadow"
-        elif hasattr(ema, "shadow_params"):          # list of tensors
-            state["ema"] = [p.detach().cpu() for p in ema.shadow_params]
-            state["ema_format"] = "shadow_params"
-        # else: silently skip if unknown
+        state["ema"] = ema.state_dict() if hasattr(ema, "state_dict") else ema
+    if t_ema is not None:
+        state["t_ema"] = t_ema.state_dict() if hasattr(t_ema, "state_dict") else t_ema
+
+    if optimizer is not None:
+        state["opt"] = optimizer.state_dict()
+    if t_optimizer is not None:
+        state["t_opt"] = t_optimizer.state_dict()
+
+    if step is not None: state["step"] = int(step)
+    if extra:            state["extra"] = extra
 
     torch.save(state, path)
 
 
-def load_checkpoint(path, model, optimizer=None, ema=None, map_location="cpu"):
+# ========== LOAD (backward-compatible) ==========
+def load_checkpoint(path, model, t_model=None, optimizer=None, t_optimizer=None,
+              ema=None, t_ema=None, map_location="cpu",
+              strict_models=True, load_optimizers=True):
     ckpt = torch.load(path, map_location=map_location)
-    model.load_state_dict(ckpt["model"])
 
-    if optimizer is not None and "optimizer" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer"])
+    m  = _live(model)
+    tm = _live(t_model) if t_model is not None else None
 
-    # ---- restore EMA if provided ----
+    # --- models ---
+    missing, unexpected = m.load_state_dict(ckpt["model"], strict=strict_models)
+    if (missing or unexpected) and strict_models:
+        print(f"[ckpt] model missing={missing} unexpected={unexpected}")
+
+    if tm is not None and "t_model" in ckpt:
+        missing, unexpected = tm.load_state_dict(ckpt["t_model"], strict=strict_models)
+        if (missing or unexpected) and strict_models:
+            print(f"[ckpt] t_model missing={missing} unexpected={unexpected}")
+    # if tm is provided but not in ckpt -> fine, you’re adding it now
+
+    # --- EMA ---
     if ema is not None and "ema" in ckpt:
-        fmt = ckpt.get("ema_format", "state_dict")
-        if fmt in ("state_dict", "module_state_dict") and hasattr(ema, "load_state_dict"):
-            ema.load_state_dict(ckpt["ema"])
-        elif hasattr(ema, "shadow"):
-            ema.shadow = ckpt["ema"]
-        elif hasattr(ema, "shadow_params"):
-            for p, q in zip(ema.shadow_params, ckpt["ema"]):
-                p.data.copy_(q)
+        ema.load_state_dict(ckpt["ema"]) if hasattr(ema, "load_state_dict") else None
+    if t_ema is not None and "t_ema" in ckpt:
+        t_ema.load_state_dict(ckpt["t_ema"]) if hasattr(t_ema, "load_state_dict") else None
 
-    step = ckpt.get("step", 0)
-    return step
+    # --- optimizers (load what exists; skip otherwise) ---
+    if load_optimizers:
+        _safe_load_opt(optimizer,   ckpt.get("opt"),   name="optimizer")
+        _safe_load_opt(t_optimizer, ckpt.get("t_opt"), name="t_optimizer")
+
+    return ckpt.get("step", 0)

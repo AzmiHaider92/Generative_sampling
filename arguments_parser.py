@@ -10,6 +10,8 @@ class RuntimeCfg:
     dataset_root_dir: str = "./data"
     num_classes: int = 1  #
     load_dir: Optional[str] = None
+    twarp_load_dir: Optional[str] = None
+
     save_dir: Optional[str] = None
     fid_stats: Optional[str] = None
     seed: int = 10
@@ -32,15 +34,20 @@ class ModelCfg:
     mlp_ratio: float = 4.0
     class_dropout_prob: float = 0.1
 
+    # dit
     lr: float = 1e-4
+    freeze_dit: int = 1
+
     denoise_timesteps: int = 128
     cfg_scale: float = 1.5
     warmup: int = 10_000
     use_ema: int = 1
     use_stable_vae: int = 1
 
-    train_type: str = "shortcut"   # flow_matching | shortcut | progressive | consistency[-distillation] | livereflow
-    dt_mode: str = "bins" # bins | uniform_log | uniform_linear
+    train_type: str = "shortcut"   # flow_matching | shortcut
+    dt_mode: str = "bins" # bins | uniform_log | uniform_linear | twarper (a learned network)
+    t_lr: float = 5e-3 # only relevant for twarper
+    t_start_warp: int = 100 # number of steps to start updating twarper
 
     # bootstrapping in shortcut models
     bootstrap_every: int = 8
