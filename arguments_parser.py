@@ -40,6 +40,19 @@ class ModelCfg:
     use_stable_vae: int = 1
 
     train_type: str = "shortcut"   # flow_matching | shortcut | progressive | consistency[-distillation] | livereflow
+    # configs for TRM
+    trm_temperature: float = 5.0
+    lambda_flow: float = 1.0  # constant
+    quality_ramp_start: int = 10_000
+    quality_ramp_end: int = 60_000
+    lambda_quality: float = 0.5
+    align_ramp_start: int = 40_000
+    align_ramp_end: int = 90_000
+    lambda_align: float = 0.25
+    lambda_diversity: float = 0.05
+    align_alpha: float = 8.0
+    diversity_tau: float = 0.2
+
     dt_mode: str = "bins" # bins | uniform_log | uniform_linear
 
     # bootstrapping in shortcut models

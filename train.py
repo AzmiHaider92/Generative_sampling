@@ -5,12 +5,13 @@ import copy
 import numpy as np
 import torch.nn as nn
 import torch.distributed as dist
-from torch.amp import autocast, GradScaler
+from torch.amp import autocast
 import wandb
 from tqdm import tqdm
 
-from DiT.meta_model import DiT
-from DiT.model_config import get_dit_params
+from TRM.TRM_DiT import DiT
+from TRM.model_config import get_dit_params
+from TRM.train_helpers import CallModelTRM, trm_losses, train_step
 from arguments_parser import RuntimeCfg, ModelCfg, WandbCfg, load_configs_from_file, parse_args, CFG
 import importlib
 import time
@@ -166,8 +167,12 @@ def main():
         in_channels=C,
         num_classes=runtime_cfg.num_classes,
         mlp_ratio=model_cfg.mlp_ratio,
-        ignore_k=(model_cfg.train_type not in ("shortcut", "livereflow")),
+        ignore_k=(model_cfg.train_type not in ("shortcut", "TRM")),
         image_size=H,
+
+        num_of_proposals=3,  # number of proposals
+        ref_hidden=256,
+        ref_proj_dim=128
     ).to(device)
 
     if is_ddp:
@@ -185,12 +190,6 @@ def main():
         ema_model = copy.deepcopy(live_model).to(device)
         ema_model.eval()
         for p in ema_model.parameters(): p.data = p.data.float(); p.requires_grad_(False)
-
-    teacher_model = None
-    if model_cfg.train_type in ("progressive", "consistency-distillation"):
-        # copy current weights
-        teacher_model = copy.deepcopy(live_model).to(device)
-        teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
 
     # ----- opt + sched -----
     base_lr = model_cfg.lr
@@ -238,14 +237,16 @@ def main():
     # ----- get targets (method= fm / shortcut / ... ) -----
     def import_targets(train_type: str):
         name = {
-            "flow_matching": "papers_e2e.flow_matching",
-            "consistency": "papers_e2e.consistency",
-            "shortcut": "papers_e2e.shortcut",
+            #"flow_matching": "papers_e2e.flow_matching",
+            #"consistency": "papers_e2e.consistency",
+            #"shortcut": "papers_e2e.shortcut",
+            "TRM": "papers_e2e.TRM",
         }[train_type]
         return importlib.import_module(name).get_targets
     get_targets = import_targets(model_cfg.train_type)
 
     # ----- model wrappers -----
+    """
     @torch.no_grad()
     def _forward_model(m, x_t, t, k, labels):
         dev = next(m.parameters()).device
@@ -261,15 +262,8 @@ def main():
     def call_model(x_t, t, k, labels, use_ema: bool = False):
         m = ema_model if use_ema else (dit.module if is_ddp else dit)
         return _forward_model(m, x_t, t, k, labels)
-
-    #@torch.no_grad()
-    #def call_model_teacher(x_t, t, k, labels):
-    #    m = teacher_model if (teacher_model is not None) else ema_model
-    #    return _forward_model(m, x_t, t, k, labels)
-
-    #@torch.no_grad()
-    #def call_model_student_ema(x_t, t, k, labels):
-    #    return _forward_model(ema_model, x_t, t, k, labels)
+    """
+    call_model = CallModelTRM(dit, ema_model, teacher_use_refined=False, teacher_temperature=0.0)
 
     cfg = CFG(runtime_cfg=runtime_cfg, model_cfg=model_cfg, wandb_cfg=wandb_cfg)
 
@@ -313,28 +307,12 @@ def main():
         batch_images = maybe_encode(batch_images)
 
         # targets per train_type
-        if model_cfg.train_type == 'flow_matching':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
-        elif model_cfg.train_type == 'consistency':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
-        elif model_cfg.train_type == 'shortcut':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
-        #elif model_cfg.train_type == 'progressive':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, batch_images, batch_labels, step=step)
-        #elif model_cfg.train_type == 'consistency-distillation':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, call_model_student_ema, batch_images, batch_labels)
-        #elif model_cfg.train_type == 'livereflow':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
-        else:
-            raise ValueError(f"Unknown train_type: {model_cfg.train_type}")
+        #elif model_cfg.train_type == 'TRM':
+        losses, loggings = train_step(step, batch_images, batch_labels, cfg, gen, dit, ema_model)
+        loss = losses["loss"]
 
         # forward + loss
         opt.zero_grad(set_to_none=True)
-        with autocast('cuda', dtype=amp_dtype):
-            v_pred = (dit)(x_t, t_vec, k_vec, labels_eff, train=True)
-            mse = (v_pred - v_t).float().pow(2).mean(dim=(1, 2, 3))
-            loss = mse.mean()
-
         loss.backward()
         torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0)
         opt.step()
@@ -350,49 +328,7 @@ def main():
         for g in opt.param_groups: g['lr'] = lr
 
         if (step % runtime_cfg.log_interval) == 0:
-            # cheap scalars on every rank, averaged like JAX
-            train_loss_mean = ddp_mean(loss)
-            vmag_mean = ddp_mean(v_pred.square().mean().sqrt())
-
-            # quick, single-rank validation (no activations)
-            if (not is_ddp) or rank == 0:
-                try:
-                    vimg, vlbl = next(valid_iter)
-                except StopIteration:
-                    valid_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
-                                                  per_rank_bs, False, runtime_cfg.debug_overfit)
-                    vimg, vlbl = next(valid_iter)
-
-                vimg = maybe_encode(vimg)
-                vimg = vimg.to(device, non_blocking=True)
-                vlbl = vlbl.to(device, non_blocking=True)
-
-                with torch.inference_mode(), autocast('cuda', dtype=amp_dtype):
-                    #if model_cfg.train_type in ("flow_matching", "shortcut", "livereflow"):
-                    v_x_t, v_v_t, v_t_vec, v_k_vec, v_lbl, _ = get_targets(cfg, gen, vimg, vlbl, call_model, step)
-                    #elif model_cfg.train_type == "progressive":
-                    #    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_teacher, vimg, vlbl,
-                    #                                                        step=step)
-                    #else:  # "consistency" / "consistency-distillation"
-                    #    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_student_ema, vimg,
-                    #                                                        vlbl)
-
-                    v_pred2 = dit(v_x_t, v_t_vec, v_k_vec, v_lbl, train=False)
-                    v_loss = ((v_pred2 - v_v_t).pow(2).mean(dim=(1, 2, 3))).mean().item()
-
-                wandb.log({
-                    "training/loss": train_loss_mean,
-                    "training/v_magnitude_prime": vmag_mean,
-                    "training/lr": lr,
-                    "training/loss_valid": v_loss,
-                }, step=step)
-
-
-        # progressive: refresh teacher
-        #if model_cfg.train_type == 'progressive':
-        #    num_sections = int(math.log2(model_cfg.denoise_timesteps))
-        #    if step % max(1, (runtime_cfg.max_steps // max(1, num_sections))) == 0 and teacher_model is not None:
-        #        teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
+            wandb.log(loggings, step=step)
 
         # eval
         if ((step % runtime_cfg.eval_interval) == 0 or step == 1) and rank == 0 :
@@ -400,7 +336,6 @@ def main():
             if (not is_ddp) or rank == 0:
                 validate(cfg,
                              ema_model,
-                             # pass a real ema_model if you keep a separate module
                              dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
                                                            per_rank_bs, True, runtime_cfg.debug_overfit),
                              vae=vae,
@@ -434,7 +369,7 @@ def main():
             cfg,
             ema_model,
             vae=vae,
-            num_generations=50000,  # total across ALL GPUs
+            num_generations=8,  # total across ALL GPUs
             fid_stats_path=runtime_cfg.fid_stats
             )
 
