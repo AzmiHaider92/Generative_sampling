@@ -95,11 +95,10 @@ def sample_dt_t_bins(bootstrap_size: int, denoise_timesteps: int, device, gen, b
 
 @torch.no_grad()
 def sample_dt_t_uniform(bootstrap_size: int, denoise_timesteps: int, device, gen,
-                        mode: str = "log", dt_min: float | None = None,
+                        dt_min: float | None = None,
                         force_level: float = -1, force_t: float = -1):
     """
     Uniform samplers (continuous levels).
-      mode="log":   s ~ U[0,K], dt=2^{-s}  (scale-balanced; recommended)
       mode="linear": dt ~ U[dt_min, 1]
     Returns:
       dt, dt_half                   (B_b,) float
@@ -113,17 +112,10 @@ def sample_dt_t_uniform(bootstrap_size: int, denoise_timesteps: int, device, gen
 
     K = float(math.log2(int(denoise_timesteps)))
 
-    if mode == "linear":
-        if dt_min is None:
-            dt_min = 2.0 ** (-K)  # as fine as the original schedule
-        dt = torch.empty(bootstrap_size, device=device).uniform_(dt_min, 1.0, generator=gen)
-        k_code = -torch.log2(dt)  # continuous level code
-    elif mode == "log":
-        s = torch.empty(bootstrap_size, device=device).uniform_(0.0, K, generator=gen)  # s in [0, K]
-        k_code = s.clone()          # level code = s
-        dt = torch.pow(2.0, -k_code)
-    else:
-        raise ValueError("mode must be 'log' or 'linear'")
+    if dt_min is None:
+        dt_min = 2.0 ** (-K)  # as fine as the original schedule
+    dt = torch.empty(bootstrap_size, device=device).uniform_(dt_min, 1.0, generator=gen)
+    k_code = -torch.log2(dt)  # continuous level code
 
     if force_level != -1:
         k_code = torch.full_like(k_code, float(force_level))
@@ -150,8 +142,8 @@ def get_targets(cfg, gen, images, labels, call_model, step, force_t: float = -1,
     """
     Supports two (k,t) sampling schemes:
       - dt_mode='bins'          : discrete dyadic levels + grid-aligned t
-      - dt_mode='uniform_log'   : log-uniform levels (continuous), t~U[0,1-dt/2]
-      - dt_mode='uniform_linear': linear-uniform dt, t~U[0,1-dt/2]
+      - dt_mode='uniform_log'   : log-uniform levels (continuous), t~U[0,1-dt]
+      - dt_mode='uniform_linear': linear-uniform dt, t~U[0,1-dt]
     Returns:
       x_t_out, v_t_out, t_out, k_out, labels_out, info
     """
@@ -176,20 +168,12 @@ def get_targets(cfg, gen, images, labels, call_model, step, force_t: float = -1,
             bias=int(cfg.model_cfg.bootstrap_dt_bias),
             force_level=force_dt, force_t=force_t
         )
-    elif dt_mode == "uniform_log":
+    elif dt_mode == "uniform":
         dt, dt_half, k_code, k_teacher_code, t, num_dt_cfg = sample_dt_t_uniform(
             bootstrap_size=bootstrap_size,
             denoise_timesteps=T,
             device=device, gen=gen,
-            mode="log",
-            force_level=force_dt, force_t=force_t
-        )
-    elif dt_mode == "uniform_linear":
-        dt, dt_half, k_code, k_teacher_code, t, num_dt_cfg = sample_dt_t_uniform(
-            bootstrap_size=bootstrap_size,
-            denoise_timesteps=T,
-            device=device, gen=gen,
-            mode="linear", dt_min=None,
+            dt_min=None,
             force_level=force_dt, force_t=force_t
         )
     else:
@@ -251,8 +235,11 @@ def get_targets(cfg, gen, images, labels, call_model, step, force_t: float = -1,
     # === Section 4: Flow-matching targets (global) ===
     rest = B - bootstrap_size
     if rest > 0:
-        t_flow = torch.randint(0, T, (rest,), generator=gen, device=device).float()
-        t_flow = t_flow / float(T)
+        if dt_mode == "uniform":
+            t_flow = torch.rand((rest,), device=device, generator=gen).float()
+        else:
+            t_flow = torch.randint(0, T, (rest,), generator=gen, device=device).float()
+            t_flow = t_flow / float(T)
         if force_t != -1:
             t_flow = torch.full_like(t_flow, float(force_t))
         t_flow_full = t_flow.view(rest, 1, 1, 1)
