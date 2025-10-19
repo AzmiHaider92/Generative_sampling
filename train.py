@@ -15,7 +15,7 @@ from DiT.model_config import get_dit_params
 from arguments_parser import RuntimeCfg, ModelCfg, WandbCfg, load_configs_from_file, parse_args, CFG
 import importlib
 import time
-
+from typing import Optional, Tuple
 from utils.datasets import get_dataset as get_dataset_iter
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from utils.sharding import ddp_setup
@@ -34,6 +34,36 @@ try:
         torch.multiprocessing.set_start_method("spawn", force=True)
 except RuntimeError:
     pass  # already set
+
+
+def maybe_wrap_ddp(model: nn.Module, device: torch.device, is_ddp: bool):
+    if model is None:
+        return None
+    if not is_ddp:
+        return model
+    return nn.parallel.DistributedDataParallel(
+        model,
+        device_ids=[device.index],
+        output_device=device.index,
+        find_unused_parameters=False,
+    )
+
+
+def unwrap(model: Optional[nn.Module], is_ddp: bool):
+    if model is None:
+        return None
+    return model.module if is_ddp else model
+
+
+def make_ema(src: nn.Module):
+    if src is None:
+        return None
+    ema = copy.deepcopy(src).to(next(src.parameters()).device)
+    ema.eval()
+    for p in ema.parameters():
+        p.data = p.data.float()
+        p.requires_grad_(False)
+    return ema
 
 
 # ---------------- Utils ----------------
@@ -184,40 +214,35 @@ def main():
         image_size=H,
     ).to(device)
 
-    dt_selector = None
+    # --- build optional selector ---
+    dt_selector: Optional[nn.Module] = None
     if model_cfg.train_type == "adaptive_step":
         dt_selector = DtSelector(
             K=int(math.log2(model_cfg.denoise_timesteps)),
-            token_dim=C,  # e.g., C if x_t is [B,C,H,W] or D for tokens
-            t_dim=128, class_dim=64, num_classes=runtime_cfg.num_classes,
-                                                 mode="discrete").to(device)
+            token_dim=C,  # C for images [B,C,H,W] or D for tokens
+            t_dim=128,
+            class_dim=64,
+            num_classes=runtime_cfg.num_classes,
+            mode="discrete",
+        ).to(device)
 
-    if is_ddp:
-        dit = torch.nn.parallel.DistributedDataParallel(
-            dit, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
-        )
-        if dt_selector is not None:
-            dt_selector = torch.nn.parallel.DistributedDataParallel(
-                dt_selector, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
-            )
+    # --- wrap models with (optional) DDP ---
+    dit = maybe_wrap_ddp(dit, device, is_ddp)
+    dt_selector = maybe_wrap_ddp(dt_selector, device, is_ddp)
 
-    live_model = dit.module if is_ddp else dit
-    live_model_selector = dt_selector.module if is_ddp else dit
+    # Pointers to the underlying modules (use these for EMA/source-of-truth)
+    live_model = unwrap(dit, is_ddp)
+    live_model_selector = unwrap(dt_selector, is_ddp)
 
-    # EMA model: deep copy + move to device
+    # --- EMA setup ---
     ema_model = None
     ema_selector = None
-
-    ema_t = None
     EMA_DECAY = 0.9999
-    if model_cfg.use_ema:
-        ema_model = copy.deepcopy(live_model).to(device)
-        ema_model.eval()
-        for p in ema_model.parameters(): p.data = p.data.float(); p.requires_grad_(False)
+    ema_t = None  # step counter for bias-correction if you use it later
 
-        ema_selector = copy.deepcopy(live_model_selector).to(device)
-        ema_selector.eval()
-        for p in ema_selector.parameters(): p.data = p.data.float(); p.requires_grad_(False)
+    if model_cfg.use_ema:
+        ema_model = make_ema(live_model)
+        ema_selector = make_ema(live_model_selector)
 
     # ----- opt + sched -----
     base_lr = model_cfg.lr
