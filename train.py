@@ -9,11 +9,13 @@ from torch.amp import autocast, GradScaler
 import wandb
 from tqdm import tqdm
 
+from DiT.dt_selector import DtSelector
 from DiT.meta_model import DiT
 from DiT.model_config import get_dit_params
 from arguments_parser import RuntimeCfg, ModelCfg, WandbCfg, load_configs_from_file, parse_args, CFG
 import importlib
 import time
+
 from utils.datasets import get_dataset as get_dataset_iter
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from utils.sharding import ddp_setup
@@ -122,6 +124,18 @@ def main():
     valid_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit)
     example_images, example_labels = next(train_iter)
 
+    # ----- method= flow matching / shortcut / adaptive step (learned dt) ... ) -----
+    def import_targets(train_type: str):
+        name = {
+            "flow_matching": "papers_e2e.flow_matching",
+            "consistency": "papers_e2e.consistency",
+            "shortcut": "papers_e2e.shortcut",
+            "shortcut_cont": "papers_e2e.shortcut_cont",
+            #"adaptive_step": "papers_e2e.adaptive_step"
+        }[train_type]
+        return importlib.import_module(name).get_targets
+    get_targets = import_targets(model_cfg.train_type)
+
     # ----- wandb -----
     if (not is_ddp) or rank == 0:
         # timestamped run name
@@ -170,15 +184,30 @@ def main():
         image_size=H,
     ).to(device)
 
+    dt_selector = None
+    if model_cfg.train_type == "adaptive_step":
+        dt_selector = DtSelector(
+            K=int(math.log2(model_cfg.denoise_timesteps)),
+            token_dim=C,  # e.g., C if x_t is [B,C,H,W] or D for tokens
+            t_dim=128, class_dim=64, num_classes=runtime_cfg.num_classes,
+                                                 mode="discrete").to(device)
+
     if is_ddp:
         dit = torch.nn.parallel.DistributedDataParallel(
             dit, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
         )
+        if dt_selector is not None:
+            dt_selector = torch.nn.parallel.DistributedDataParallel(
+                dt_selector, device_ids=[device.index], output_device=device.index, find_unused_parameters=False
+            )
 
     live_model = dit.module if is_ddp else dit
+    live_model_selector = dt_selector.module if is_ddp else dit
 
     # EMA model: deep copy + move to device
     ema_model = None
+    ema_selector = None
+
     ema_t = None
     EMA_DECAY = 0.9999
     if model_cfg.use_ema:
@@ -186,11 +215,9 @@ def main():
         ema_model.eval()
         for p in ema_model.parameters(): p.data = p.data.float(); p.requires_grad_(False)
 
-    teacher_model = None
-    if model_cfg.train_type in ("progressive", "consistency-distillation"):
-        # copy current weights
-        teacher_model = copy.deepcopy(live_model).to(device)
-        teacher_model.load_state_dict((dit.module if is_ddp else dit).state_dict())
+        ema_selector = copy.deepcopy(live_model_selector).to(device)
+        ema_selector.eval()
+        for p in ema_selector.parameters(): p.data = p.data.float(); p.requires_grad_(False)
 
     # ----- opt + sched -----
     base_lr = model_cfg.lr
@@ -218,6 +245,8 @@ def main():
         return min_lr + 0.5 * (base_lr - min_lr) * (1 + math.cos(math.pi * t))
 
     opt = torch.optim.AdamW(param_groups(dit, wd=0.05), lr=base_lr, betas=(0.9, 0.95), eps=1e-8, fused=True)
+    if dt_selector is not None:
+        opt_sel = torch.optim.AdamW(dt_selector.parameters(), lr=model_cfg.lr_selector, weight_decay=0.05)
 
     amp_dtype = torch.bfloat16  # match original-style BF16
     #    scaler = GradScaler('cuda', enabled=(amp_dtype is torch.float16))
@@ -235,32 +264,22 @@ def main():
             if (not is_ddp) or rank == 0:
                 print(f"[load] no checkpoint found at {ckpt_path}")
 
-    # ----- get targets (method= fm / shortcut / ... ) -----
-    def import_targets(train_type: str):
-        name = {
-            "flow_matching": "papers_e2e.flow_matching",
-            "consistency": "papers_e2e.consistency",
-            "shortcut": "papers_e2e.shortcut",
-        }[train_type]
-        return importlib.import_module(name).get_targets
-    get_targets = import_targets(model_cfg.train_type)
-
     # ----- model wrappers -----
     @torch.no_grad()
-    def _forward_model(m, x_t, t, k, labels):
+    def _forward_model(m, x_t, t, k, labels, train=False):
         dev = next(m.parameters()).device
         # move inputs to the model's device
         x_t = x_t.to(dev, non_blocking=True)
         t = t.to(dev, dtype=torch.float32, non_blocking=True)
         k = k.to(dev, dtype=torch.float32, non_blocking=True)
         labels = labels.to(dev, dtype=torch.long, non_blocking=True)
-        v_pred = m(x_t, t, k, labels, train=False)
+        v_pred = m(x_t, t, k, labels, train=train)
         return v_pred
 
     @torch.no_grad()
-    def call_model(x_t, t, k, labels, use_ema: bool = False):
+    def call_model(x_t, t, k, labels, use_ema: bool = True, train: bool = False):
         m = ema_model if use_ema else (dit.module if is_ddp else dit)
-        return _forward_model(m, x_t, t, k, labels)
+        return _forward_model(m, x_t, t, k, labels, train)
 
     #@torch.no_grad()
     #def call_model_teacher(x_t, t, k, labels):
@@ -313,25 +332,26 @@ def main():
         batch_images = maybe_encode(batch_images)
 
         # targets per train_type
+
         if model_cfg.train_type == 'flow_matching':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
+            x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
         elif model_cfg.train_type == 'consistency':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
+            x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
         elif model_cfg.train_type == 'shortcut':
-            x_t, v_t, t_vec, k_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
-        #elif model_cfg.train_type == 'progressive':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, batch_images, batch_labels, step=step)
-        #elif model_cfg.train_type == 'consistency-distillation':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model_teacher, call_model_student_ema, batch_images, batch_labels)
-        #elif model_cfg.train_type == 'livereflow':
-        #    x_t, v_t, t_vec, dt_base, labels_eff, info = get_targets(cfg, gen, call_model, batch_images, batch_labels)
+            x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
+        elif model_cfg.train_type == 'shortcut_cont':
+            x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
+        elif model_cfg.train_type == 'adaptive_step':
+            x_t, v_t, t_vec, dt_vec, labels_eff, _ = get_targets(cfg, gen, batch_images, batch_labels, call_model, step,
+                                                                 dt_selector=dt_selector, selector_mode="discrete",
+                                                                 selector_exploration_p=0.1)
         else:
             raise ValueError(f"Unknown train_type: {model_cfg.train_type}")
 
         # forward + loss
         opt.zero_grad(set_to_none=True)
         with autocast('cuda', dtype=amp_dtype):
-            v_pred = (dit)(x_t, t_vec, k_vec, labels_eff, train=True)
+            v_pred = (dit)(x_t, t_vec, dt_vec, labels_eff, train=True)
             mse = (v_pred - v_t).float().pow(2).mean(dim=(1, 2, 3))
             loss = mse.mean()
 
@@ -368,17 +388,9 @@ def main():
                 vlbl = vlbl.to(device, non_blocking=True)
 
                 with torch.inference_mode(), autocast('cuda', dtype=amp_dtype):
-                    #if model_cfg.train_type in ("flow_matching", "shortcut", "livereflow"):
-                    v_x_t, v_v_t, v_t_vec, v_k_vec, v_lbl, _ = get_targets(cfg, gen, vimg, vlbl, call_model, step)
-                    #elif model_cfg.train_type == "progressive":
-                    #    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_teacher, vimg, vlbl,
-                    #                                                        step=step)
-                    #else:  # "consistency" / "consistency-distillation"
-                    #    v_x_t, v_v_t, v_t_vec, v_dt, v_lbl, _ = get_targets(cfg, gen, call_model_student_ema, vimg,
-                    #                                                        vlbl)
-
-                    v_pred2 = dit(v_x_t, v_t_vec, v_k_vec, v_lbl, train=False)
-                    v_loss = ((v_pred2 - v_v_t).pow(2).mean(dim=(1, 2, 3))).mean().item()
+                    x_t, v_t, t_vec, dt_vec, v_lbl, info = get_targets(cfg, gen, vimg, vlbl, call_model, step)
+                    v_pred2 = dit(x_t, t_vec, dt_vec, v_lbl, train=False)
+                    v_loss = ((v_pred2 - v_t).pow(2).mean(dim=(1, 2, 3))).mean().item()
 
                 wandb.log({
                     "training/loss": train_loss_mean,

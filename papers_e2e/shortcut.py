@@ -10,262 +10,153 @@ https://arxiv.org/abs/2410.12557
 
 
 @torch.no_grad()
-def _build_k_bins(bootstrap_size: int, K: int, device, bias: int):
+def get_targets(cfg, gen, images, labels, call_model_fn, step, force_t: float = -1.0, force_dt: float = -1.0):
     """
-    Original paper's *binned* scheme for level indices.
-    Returns:
-      k_long: (B_b,) int64 with levels k ∈ {0 .. K-1}
-      num_dt_cfg: int for CFG duplication in bootstrap
-    """
-    if bootstrap_size <= 0:
-        return torch.empty(0, dtype=torch.long, device=device), 0
-
-    if bias == 0:
-        levels = torch.arange(K - 1, -1, -1, device=device, dtype=torch.long)  # [K-1 .. 0]
-        reps = max(1, bootstrap_size // max(1, K))
-        k_long = levels.repeat_interleave(reps)
-        if k_long.numel() < bootstrap_size:
-            k_long = torch.cat([k_long,
-                                torch.zeros(bootstrap_size - k_long.numel(), device=device, dtype=torch.long)], 0)
-        k_long = k_long[:bootstrap_size]
-        num_dt_cfg = bootstrap_size // max(1, K)
-    else:
-        # Biased: chunk over [K-1 .. 2], then a quarter ones, a quarter zeros, then pad
-        upper = torch.arange(K - 1, 1, -1, device=device, dtype=torch.long)  # [K-1 .. 2]
-        reps = max(1, (bootstrap_size // 2) // max(1, K))
-        a = upper.repeat_interleave(reps)
-        b = torch.ones(bootstrap_size // 4, device=device, dtype=torch.long)
-        c = torch.zeros(bootstrap_size // 4, device=device, dtype=torch.long)
-        k_long = torch.cat([a, b, c], 0)
-        if k_long.numel() < bootstrap_size:
-            k_long = torch.cat([k_long,
-                                torch.zeros(bootstrap_size - k_long.numel(), device=device, dtype=torch.long)], 0)
-        k_long = k_long[:bootstrap_size]
-        num_dt_cfg = max(1, (bootstrap_size // 2) // max(1, K))
-
-    return k_long, int(num_dt_cfg)
-
-
-@torch.no_grad()
-def sample_dt_t_bins(bootstrap_size: int, denoise_timesteps: int, device, gen, bias: int,
-                     force_level: float = -1, force_t: float = -1):
-    """
-    Original 'bins' method (discrete dyadic levels).
-    Returns:
-      dt, dt_half                   (B_b,) float
-      k_code, k_teacher_code        (B_b,) float  (level codes for student/teacher)
-      t                              (B_b,) float
-      num_dt_cfg                     int
-
-    # example: denoise_timesteps = 128, bootstrap_size=8
-    # K=log(128) = 7, levels k -{6,5,4,3,2,1,0,0},
-    # for each level k => dt=2^-k and t ∈ {0,dt,2dt,…,1−dt}
-    # for example: ki=6 => dt = 1/64 and t ∈ {1/64, 2/64, 3/64, ...., 63/64}
-    #
-    """
-    K = int(math.log2(int(denoise_timesteps)))
-    k_long, num_dt_cfg = _build_k_bins(bootstrap_size, K, device, bias)
-
-    if bootstrap_size == 0:
-        z = torch.empty(0, device=device)
-        return z, z, z, z, z, 0
-
-    if force_level != -1:
-        k_long = torch.full_like(k_long, int(force_level))
-
-    # step sizes
-    dt = torch.pow(2.0, -k_long.float())
-    dt_half = 0.5 * dt
-
-    # level codes for model embedders
-    k_code = k_long.float()                  # student level (k)
-    k_teacher_code = k_code + 1.0            # teacher level (k+1)  (≤ K in bins)
-
-    # grid-aligned t over {0, dt, 2dt, ..., 1-dt}
-    dt_sections = torch.pow(2.0, k_long.float())
-    u = torch.rand(bootstrap_size, device=device, generator=gen)
-    t_bins = torch.floor(u * dt_sections).to(torch.long)
-    t_bins = torch.minimum(t_bins, dt_sections.to(torch.long) - 1)
-    t = t_bins.float() / dt_sections
-    if force_t != -1:
-        t = torch.full_like(t, float(force_t))
-
-    return dt, dt_half, k_code, k_teacher_code, t, num_dt_cfg
-
-
-@torch.no_grad()
-def sample_dt_t_uniform(bootstrap_size: int, denoise_timesteps: int, device, gen,
-                        dt_min: float | None = None,
-                        force_level: float = -1, force_t: float = -1):
-    """
-    Uniform samplers (continuous levels).
-      mode="linear": dt ~ U[dt_min, 1]
-    Returns:
-      dt, dt_half                   (B_b,) float
-      k_code, k_teacher_code        (B_b,) float  (continuous level codes)
-      t                              (B_b,) float  (U[0, 1-dt/2])
-      num_dt_cfg                     int
-    """
-    if bootstrap_size == 0:
-        z = torch.empty(0, device=device)
-        return z, z, z, z, z, 0
-
-    K = float(math.log2(int(denoise_timesteps)))
-
-    if dt_min is None:
-        dt_min = 2.0 ** (-K)  # as fine as the original schedule
-    dt = torch.empty(bootstrap_size, device=device).uniform_(dt_min, 1.0, generator=gen)
-    k_code = -torch.log2(dt)  # continuous level code
-
-    if force_level != -1:
-        k_code = torch.full_like(k_code, float(force_level))
-        dt = torch.pow(2.0, -k_code)
-
-    dt_half = 0.5 * dt
-
-    # Ensure t + dt/2 <= 1
-    t = torch.rand(bootstrap_size, device=device, generator=gen) * (1.0 - dt_half)
-    if force_t != -1:
-        t = torch.full_like(t, float(force_t))
-
-    # Teacher level = k+1, but clamp to K to keep embedder range consistent
-    K_tensor = torch.tensor(K, device=device)
-    k_teacher_code = torch.minimum(k_code + 1.0, K_tensor)
-
-    # heuristic: same duplication budget as bins
-    num_dt_cfg = bootstrap_size // max(1, int(K))
-    return dt, dt_half, k_code, k_teacher_code, t, int(num_dt_cfg)
-
-
-@torch.no_grad()
-def get_targets(cfg, gen, images, labels, call_model, step, force_t: float = -1, force_dt: float = -1):
-    """
-    Supports two (k,t) sampling schemes:
-      - dt_mode='bins'          : discrete dyadic levels + grid-aligned t
-      - dt_mode='uniform_log'   : log-uniform levels (continuous), t~U[0,1-dt]
-      - dt_mode='uniform_linear': linear-uniform dt, t~U[0,1-dt]
-    Returns:
-      x_t_out, v_t_out, t_out, k_out, labels_out, info
+    PyTorch port of get_targets (JAX). Returns:
+      x_t, v_t, t, dt_base, labels_dropped, info
     """
     device = images.device
     B = images.shape[0]
+    denoise_timesteps = int(cfg.model_cfg.denoise_timesteps)
+    bootstrap_every = cfg.model_cfg.bootstrap_every
+    cfg_scale = cfg.model_cfg.cfg_scale
+    class_dropout_prob = cfg.model_cfg.class_dropout_prob
+    num_classes = cfg.runtime_cfg.num_classes
 
-    # Constants
-    T = int(cfg.model_cfg.denoise_timesteps)
-    K = int(math.log2(T))
+    # ---------- 1) Sample dt (bootstrap) ----------
+    bootstrap_batchsize = B // bootstrap_every
+    log2_sections = int(math.log2(denoise_timesteps))  # e.g., 128 -> 7
 
-    # === Section 1: choose bootstrap subset size ===
-    bootstrap_every = int(cfg.model_cfg.bootstrap_every)
-    bootstrap_size = min(B, B // max(1, bootstrap_every))
-
-    # === Sections 1–2: sample (k,t) & step sizes (two schemes) ===
-    dt_mode = getattr(cfg.model_cfg, "dt_mode", "bins")
-    if dt_mode == "bins":
-        dt, dt_half, k_code, k_teacher_code, t, num_dt_cfg = sample_dt_t_bins(
-            bootstrap_size=bootstrap_size,
-            denoise_timesteps=T,
-            device=device, gen=gen,
-            bias=int(cfg.model_cfg.bootstrap_dt_bias),
-            force_level=force_dt, force_t=force_t
-        )
-    elif dt_mode == "uniform":
-        dt, dt_half, k_code, k_teacher_code, t, num_dt_cfg = sample_dt_t_uniform(
-            bootstrap_size=bootstrap_size,
-            denoise_timesteps=T,
-            device=device, gen=gen,
-            dt_min=None,
-            force_level=force_dt, force_t=force_t
-        )
+    if cfg.model_cfg.bootstrap_dt_bias == 0:
+        # dt_base in {log2_sections-1, ..., 0}
+        levels = torch.arange(log2_sections - 1, -1, -1, device=device, dtype=torch.long)
+        reps = max(1, bootstrap_batchsize // max(1, log2_sections))
+        dt_base = levels.repeat_interleave(reps)
+        if dt_base.numel() < bootstrap_batchsize:
+            pad = torch.zeros(bootstrap_batchsize - dt_base.numel(), device=device, dtype=torch.long)
+            dt_base = torch.cat([dt_base, pad], dim=0)
+        dt_base = dt_base[:bootstrap_batchsize]  # (B_b,)
+        num_dt_cfg = bootstrap_batchsize // max(1, log2_sections)
     else:
-        raise ValueError(f"Unknown dt_mode: {dt_mode}")
+        # biased mix (like JAX version)
+        levels = torch.arange(log2_sections - 1, -1, -1, device=device, dtype=torch.long)
+        # the JAX code uses (bootstrap_batchsize // 2) // log2_sections for repeats of shortened levels
+        short_levels = torch.arange(log2_sections - 3, -1, -1, device=device, dtype=torch.long)  # log2_sections-2 terms
+        reps = max(1, (bootstrap_batchsize // 2) // max(1, log2_sections))
+        dt_base = short_levels.repeat_interleave(reps)  # shrink
+        # then append 1s and 0s quarters
+        part = bootstrap_batchsize // 4
+        dt_base = torch.cat([dt_base,
+                             torch.ones(part, device=device, dtype=torch.long),
+                             torch.zeros(part, device=device, dtype=torch.long)], dim=0)
+        if dt_base.numel() < bootstrap_batchsize:
+            pad = torch.zeros(bootstrap_batchsize - dt_base.numel(), device=device, dtype=torch.long)
+            dt_base = torch.cat([dt_base, pad], dim=0)
+        dt_base = dt_base[:bootstrap_batchsize]
+        num_dt_cfg = max(1, (bootstrap_batchsize // 2) // max(1, log2_sections))
 
-    t_full = t.view(-1, 1, 1, 1)
+    if force_dt != -1:
+        # force_dt is interpreted like JAX: overrides dt_base directly (exponent values)
+        dt_base = torch.full((bootstrap_batchsize,), int(force_dt), device=device, dtype=torch.long)
 
-    # === Section 3: Bootstrap targets (Heun teacher, optional CFG) ===
-    if bootstrap_size > 0:
-        x1 = images[:bootstrap_size]
-        x0 = torch.randn(x1.shape, dtype=x1.dtype, device=x1.device, generator=gen)
+    # dt = 1 / 2^{dt_base}   e.g., [1, 1/2, 1/4, ...]
+    dt = 1.0 / (2.0 ** dt_base.to(torch.float32))                    # (B_b,)
+    dt_base_bootstrap = dt_base + 1                                  # (B_b,) int
+    dt_bootstrap = dt / 2.0                                          # (B_b,)
 
-        # linear path with epsilon
-        x_t = (1.0 - (1.0 - EPS) * t_full) * x0 + t_full * x1
-        b_labels = labels[:bootstrap_size].to(dtype=torch.long)
+    # ---------- 2) Sample t (bootstrap) ----------
+    dt_sections = 2 ** dt_base                                       # (B_b,) int
+    # randint per-example in [0, dt_sections[i])
+    # Do it by sampling in max range then mod:
+    max_section = int(dt_sections.max().item()) if dt_sections.numel() > 0 else 1
+    t_raw = torch.randint(low=0, high=max_section, size=(bootstrap_batchsize,), device=device, generator=gen)
 
-        use_ema = True # use the ema to produce teacher targets
-        if not cfg.model_cfg.bootstrap_cfg:
-            v_b1 = call_model(x_t, t, k_teacher_code, b_labels, use_ema=use_ema)
-            x_t2 = torch.clamp(x_t + dt_half.view(-1, 1, 1, 1) * v_b1, -4, 4)
-            v_b2 = call_model(x_t2, t + dt_half, k_teacher_code, b_labels, use_ema=use_ema)
-            v_target = 0.5 * (v_b1 + v_b2)
-        else:
-            num_dt_cfg = min(num_dt_cfg, bootstrap_size)
-            x_t_ext = torch.cat([x_t, x_t[:num_dt_cfg]], 0)
-            t_ext = torch.cat([t, t[:num_dt_cfg]], 0)
-            k_ext = torch.cat([k_teacher_code, k_teacher_code[:num_dt_cfg]], 0)
-            labels_ext = torch.cat(
-                [b_labels, torch.full((num_dt_cfg,), cfg.runtime_cfg.num_classes if cfg.runtime_cfg.num_classes > 1 else 0,
-                                      device=device, dtype=torch.long)], 0
-            )
+    t_mod = (t_raw % torch.clamp(dt_sections, min=1))                # (B_b,)
+    t = t_mod.to(torch.float32) / torch.clamp(dt_sections.to(torch.float32), min=1.0)  # in [0,1)
+    if force_t != -1:
+        t = torch.full_like(t, float(force_t))
 
-            v_raw = call_model(x_t_ext, t_ext, k_ext, labels_ext, use_ema=use_ema)
-            v_cond, v_uncond = v_raw[:bootstrap_size], v_raw[bootstrap_size:]
-            v_cfg = v_uncond + float(cfg.model_cfg.cfg_scale) * (v_cond[:num_dt_cfg] - v_uncond)
-            v_b1 = torch.cat([v_cfg, v_cond[num_dt_cfg:]], 0)
+    t_full = t.view(bootstrap_batchsize, *([1] * (images.ndim - 1)))  # [B_b, 1, 1, 1]
 
-            x_t2 = torch.clamp(x_t + dt_half.view(-1, 1, 1, 1) * v_b1, -4, 4)
-            x_t2_ext = torch.cat([x_t2, x_t2[:num_dt_cfg]], 0)
-            t2_ext = torch.cat([t + dt_half, (t + dt_half)[:num_dt_cfg]], 0)
+    # ---------- 3) Bootstrap targets ----------
+    x_1 = images[:bootstrap_batchsize]                                # clean
+    x_0 = torch.randn(x_1.shape, dtype=x_1.dtype, device=x_1.device, generator=gen)
 
-            v2_raw = call_model(x_t2_ext, t2_ext, k_ext, labels_ext, use_ema=use_ema)
-            v2_cond, v2_uncond = v2_raw[:bootstrap_size], v2_raw[bootstrap_size:]
-            v2_cfg = v2_uncond + float(cfg.model_cfg.cfg_scale) * (v2_cond[:num_dt_cfg] - v2_uncond)
-            v_b2 = torch.cat([v2_cfg, v2_cond[num_dt_cfg:]], 0)
+    x_t = (1.0 - (1.0 - EPS) * t_full) * x_0 + t_full * x_1           # convex combo
+    bst_labels = labels[:bootstrap_batchsize]
 
-            v_target = 0.5 * (v_b1 + v_b2)
-
-        v_target = torch.clamp(v_target, -4, 4)
-        bst_v, bst_k, bst_t, bst_xt, bst_l = v_target, k_code, t, x_t, b_labels
+    if not cfg.model_cfg.bootstrap_cfg:
+        v_b1 = call_model_fn(x_t, t, dt_base_bootstrap, bst_labels, train=False)
+        t2 = t + dt_bootstrap
+        x_t2 = x_t + dt_bootstrap.view(-1, *([1] * (images.ndim - 1))) * v_b1
+        x_t2 = torch.clamp(x_t2, -4.0, 4.0)
+        v_b2 = call_model_fn(x_t2, t2, dt_base_bootstrap, bst_labels, train=False)
+        v_target = 0.5 * (v_b1 + v_b2)
     else:
-        bst_v = images.new_empty((0,) + images.shape[1:])
-        bst_k = torch.empty(0, device=device)     # float level code
-        bst_t = torch.empty(0, device=device)
-        bst_xt = images.new_empty((0,) + images.shape[1:])
-        bst_l = torch.empty(0, dtype=torch.long, device=device)
-        v_b1 = v_b2 = images.new_zeros(1)
+        # CFG duplication
+        x_t_extra = torch.cat([x_t, x_t[:num_dt_cfg]], dim=0)
+        t_extra = torch.cat([t, t[:num_dt_cfg]], dim=0)
+        dt_base_extra = torch.cat([dt_base_bootstrap, dt_base_bootstrap[:num_dt_cfg]], dim=0)
+        labels_extra = torch.cat([bst_labels, torch.full((num_dt_cfg,), num_classes, device=device, dtype=torch.long)], dim=0)
 
-    # === Section 4: Flow-matching targets (global) ===
-    rest = B - bootstrap_size
-    if rest > 0:
-        if dt_mode == "uniform":
-            t_flow = torch.rand((rest,), device=device, generator=gen).float()
-        else:
-            t_flow = torch.randint(0, T, (rest,), generator=gen, device=device).float()
-            t_flow = t_flow / float(T)
-        if force_t != -1:
-            t_flow = torch.full_like(t_flow, float(force_t))
-        t_flow_full = t_flow.view(rest, 1, 1, 1)
+        v_b1_raw = call_model_fn(x_t_extra, t_extra, dt_base_extra, labels_extra, train=False)
+        v_b1_cond = v_b1_raw[:x_1.shape[0]]
+        v_b1_uncond = v_b1_raw[x_1.shape[0]:]
+        v_cfg = v_b1_uncond + cfg_scale * (v_b1_cond[:num_dt_cfg] - v_b1_uncond)
+        v_b1 = torch.cat([v_cfg, v_b1_cond[num_dt_cfg:]], dim=0)
 
-        x1_flow = images[:rest]
-        x0_flow = torch.randn(x1_flow.shape, dtype=x1_flow.dtype, device=x1_flow.device, generator=gen)
+        t2 = t + dt_bootstrap
+        x_t2 = x_t + dt_bootstrap.view(-1, *([1] * (images.ndim - 1))) * v_b1
+        x_t2 = torch.clamp(x_t2, -4.0, 4.0)
 
-        # linear path & FM target with epsilon
-        x_t_flow = (1.0 - (1.0 - EPS) * t_flow_full) * x0_flow + t_flow_full * x1_flow
-        v_t_flow = x1_flow - (1.0 - EPS) * x0_flow
+        x_t2_extra = torch.cat([x_t2, x_t2[:num_dt_cfg]], dim=0)
+        t2_extra = torch.cat([t2, t2[:num_dt_cfg]], dim=0)
 
-        K_float = float(K)
-        k_flow = torch.full((rest,), K_float, device=device)  # sentinel level code
+        v_b2_raw = call_model_fn(x_t2_extra, t2_extra, dt_base_extra, labels_extra, train=False)
+        v_b2_cond = v_b2_raw[:x_1.shape[0]]
+        v_b2_uncond = v_b2_raw[x_1.shape[0]:]
+        v_b2_cfg = v_b2_uncond + cfg_scale * (v_b2_cond[:num_dt_cfg] - v_b2_uncond)
+        v_b2 = torch.cat([v_b2_cfg, v_b2_cond[num_dt_cfg:]], dim=0)
 
-        # label dropout (CFG training trick)
-        p = float(cfg.model_cfg.class_dropout_prob)
-        drop = torch.bernoulli(torch.full((rest,), p, device=device)).bool()
-        labels_flow = labels[:rest].clone().to(dtype=torch.long)
-        labels_flow[drop] = cfg.runtime_cfg.num_classes if cfg.runtime_cfg.num_classes > 1 else 0
+        v_target = 0.5 * (v_b1 + v_b2)
 
-        x_t_out = torch.cat([bst_xt, x_t_flow], 0)
-        v_t_out = torch.cat([bst_v, v_t_flow], 0)
-        t_out = torch.cat([bst_t, t_flow], 0)
-        k_out = torch.cat([bst_k, k_flow], 0)    # float level code for the model
-        labels_out = torch.cat([bst_l, labels_flow], 0)
-    else:
-        x_t_out, v_t_out, t_out, k_out, labels_out = bst_xt, bst_v, bst_t, bst_k, bst_l
+    v_target = torch.clamp(v_target, -4.0, 4.0)
+    bst_v  = v_target
+    bst_dt = dt_base.clone()                    # int64
+    bst_t  = t.clone()                          # float32
+    bst_xt = x_t
+    bst_l  = bst_labels
 
-    return x_t_out, v_t_out, t_out, k_out, labels_out, None
+    # ---------- 4) Flow-Matching targets ----------
+    # label dropout (CFG training trick)
+    drop = torch.bernoulli(torch.full((labels.shape[0],), class_dropout_prob, device=device)).bool()
+    labels_dropped = labels.clone().to(dtype=torch.long)
+    labels_dropped[drop] = num_classes if num_classes > 1 else 0
+
+    # sample t in {0..denoise_timesteps-1} then / denoise_timesteps
+    t_flow = torch.randint(low=0, high=denoise_timesteps, size=(B,), device=device, generator=gen).to(torch.float32) / float(denoise_timesteps)
+
+    if force_t != -1:
+        t_flow = torch.full_like(t_flow, float(force_t))
+    t_flow_full = t_flow.view(B, *([1] * (images.ndim - 1)))
+
+    x1_flow = images
+    x0_flow = torch.randn(x1_flow.shape, dtype=x1_flow.dtype, device=x1_flow.device, generator=gen)
+
+    x_t_flow = (1.0 - (1.0 - EPS) * t_flow_full) * x0_flow + t_flow_full * x1_flow
+    v_t_flow = x1_flow - (1.0 - EPS) * x0_flow
+
+    dt_flow_int = int(math.log2(denoise_timesteps))
+    dt_base_flow = torch.full((B,), dt_flow_int, device=device, dtype=torch.long)
+
+    # ---------- 5) Merge Flow + Bootstrap ----------
+    bst_size = B // bootstrap_every
+    bst_size_data = B - bst_size
+
+    x_t_out = torch.cat([bst_xt, x_t_flow[:bst_size_data]], dim=0)
+    t_out = torch.cat([bst_t, t_flow[:bst_size_data]], dim=0)
+    dt_base_out = torch.cat([bst_dt, dt_base_flow[:bst_size_data]], dim=0)          # int64
+    v_t_out = torch.cat([bst_v, v_t_flow[:bst_size_data]], dim=0)
+    labels_out = torch.cat([bst_l, labels_dropped[:bst_size_data]], dim=0)
+
+    return x_t_out, v_t_out, t_out, dt_base_out, labels_out, None

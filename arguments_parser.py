@@ -40,13 +40,15 @@ class ModelCfg:
     use_stable_vae: int = 1
 
     train_type: str = "shortcut"   # flow_matching | shortcut | progressive | consistency[-distillation] | livereflow
-    dt_mode: str = "bins" # bins | uniform_log | uniform_linear
 
     # bootstrapping in shortcut models
     bootstrap_every: int = 8
     bootstrap_cfg: int = 0
     bootstrap_ema: int = 1
     bootstrap_dt_bias: int = 0
+
+    dt_mode: str = "bins" # bins | uniform_log | uniform_linear
+    lr_selector: float = 1e-4
 
 @dataclass
 class WandbCfg:
