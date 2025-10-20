@@ -4,11 +4,11 @@ import torch
 EPS = 1e-5
 
 
-def _dt_to_k(dt: torch.Tensor, K_max: int, eps: float = 1e-6):
+def _dt_to_k(dt: torch.Tensor, K_max: int):
     """
     Safe continuous level code: k = -log2(dt) ∈ [0, K_max].
     """
-    dt = dt.clamp(min=2.0 ** (-K_max) + eps, max=1.0)
+    dt = dt.clamp(min=2.0 ** (-K_max), max=1.0)
     k = -torch.log2(dt)
     return k.clamp(min=0.0, max=float(K_max))
 
@@ -46,7 +46,7 @@ def get_targets(
     num_classes = cfg.runtime_cfg.num_classes
 
     # dt_min from schedule; keep identical to your original
-    dt_min = 2.0 / float(T)
+    dt_min = 1.0 / float(T)
 
     info = {}
 
