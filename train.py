@@ -160,7 +160,7 @@ def main():
             "flow_matching": "papers_e2e.flow_matching",
             "consistency": "papers_e2e.consistency",
             "shortcut": "papers_e2e.shortcut",
-            "shortcut_cont": "papers_e2e.shortcut_cont",
+            "shortcut_cont": "papers_e2e.shortcut_cont_log",
             #"adaptive_step": "papers_e2e.adaptive_step"
         }[train_type]
         return importlib.import_module(name).get_targets
