@@ -46,7 +46,7 @@ def get_targets(
     num_classes = cfg.runtime_cfg.num_classes
 
     # dt_min from schedule; keep identical to your original
-    dt_min = 1.0 / float(T)
+    dt_min = 2.0 / float(T)
 
     info = {}
 
