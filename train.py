@@ -210,7 +210,7 @@ def main():
         in_channels=C,
         num_classes=runtime_cfg.num_classes,
         mlp_ratio=model_cfg.mlp_ratio,
-        ignore_k=(model_cfg.train_type not in ("shortcut", "livereflow")),
+        ignore_k=(model_cfg.train_type not in ("shortcut", "shortcut_cont")),
         image_size=H,
     ).to(device)
 
