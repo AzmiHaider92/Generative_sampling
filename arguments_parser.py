@@ -47,8 +47,8 @@ class ModelCfg:
     bootstrap_ema: int = 1
     bootstrap_dt_bias: int = 0
 
-    dt_mode: str = "bins" # bins | uniform_log | uniform_linear
-    lr_selector: float = 1e-4
+    # policy learning
+    lr_policy: float = 1e-4
 
 @dataclass
 class WandbCfg:

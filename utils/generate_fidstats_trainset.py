@@ -6,7 +6,7 @@ from torchvision import transforms
 from torchmetrics.image.fid import FrechetInceptionDistance
 from tqdm import tqdm
 
-from utils.celeba_hq import FlatImageFolder
+from utils.celeba_hq import FlatImageFolderSafe
 from utils.datasets import get_dataset as get_dataset_iter
 from utils.imagenet_tfds import ImageNetTFRecord
 
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     batch_size = 32
     image_size = 256
     #ds = ImageNetTFRecord(ds_root, True, 1, 0, image_size=256)
-    ds = FlatImageFolder(root=ds_root, image_size=image_size)
+    ds = FlatImageFolderSafe(root=ds_root, image_size=image_size)
 
     # Windows uses spawn ⇒ start with num_workers=0; on Linux you can bump it
     num_workers = 0 if os.name == "nt" else 1

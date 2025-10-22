@@ -5,17 +5,17 @@ import copy
 import numpy as np
 import torch.nn as nn
 import torch.distributed as dist
-from torch.amp import autocast, GradScaler
+from torch.amp import autocast
 import wandb
 from tqdm import tqdm
 
-from DiT.dt_selector import DtSelector
-from DiT.meta_model import DiT
-from DiT.model_config import get_dit_params
+from models.meta_model import DiT
+from models.model_config import get_dit_params
 from arguments_parser import RuntimeCfg, ModelCfg, WandbCfg, load_configs_from_file, parse_args, CFG
 import importlib
 import time
-from typing import Optional, Tuple
+from typing import Optional
+
 from utils.datasets import get_dataset as get_dataset_iter
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from utils.sharding import ddp_setup
@@ -160,7 +160,7 @@ def main():
             "flow_matching": "papers_e2e.flow_matching",
             "consistency": "papers_e2e.consistency",
             "shortcut": "papers_e2e.shortcut",
-            "shortcut_cont": "papers_e2e.shortcut_cont_log",
+            "shortcut_cont": "papers_e2e.shortcut_cont",
             #"adaptive_step": "papers_e2e.adaptive_step"
         }[train_type]
         return importlib.import_module(name).get_targets
@@ -210,39 +210,25 @@ def main():
         in_channels=C,
         num_classes=runtime_cfg.num_classes,
         mlp_ratio=model_cfg.mlp_ratio,
-        ignore_k=(model_cfg.train_type not in ("shortcut", "shortcut_cont")),
+        ignore_k=not (model_cfg.train_type.startswith("shortcut")),
         image_size=H,
     ).to(device)
 
-    # --- build optional selector ---
-    dt_selector: Optional[nn.Module] = None
-    if model_cfg.train_type == "adaptive_step":
-        dt_selector = DtSelector(
-            K=int(math.log2(model_cfg.denoise_timesteps)),
-            token_dim=C,  # C for images [B,C,H,W] or D for tokens
-            t_dim=128,
-            class_dim=64,
-            num_classes=runtime_cfg.num_classes,
-            mode="discrete",
-        ).to(device)
 
     # --- wrap models with (optional) DDP ---
     dit = maybe_wrap_ddp(dit, device, is_ddp)
-    dt_selector = maybe_wrap_ddp(dt_selector, device, is_ddp)
 
     # Pointers to the underlying modules (use these for EMA/source-of-truth)
     live_model = unwrap(dit, is_ddp)
-    live_model_selector = unwrap(dt_selector, is_ddp)
 
     # --- EMA setup ---
     ema_model = None
-    ema_selector = None
+    ema_policy = None
     EMA_DECAY = 0.9999
     ema_t = None  # step counter for bias-correction if you use it later
 
     if model_cfg.use_ema:
         ema_model = make_ema(live_model)
-        ema_selector = make_ema(live_model_selector)
 
     # ----- opt + sched -----
     base_lr = model_cfg.lr
@@ -270,8 +256,6 @@ def main():
         return min_lr + 0.5 * (base_lr - min_lr) * (1 + math.cos(math.pi * t))
 
     opt = torch.optim.AdamW(param_groups(dit, wd=0.05), lr=base_lr, betas=(0.9, 0.95), eps=1e-8, fused=True)
-    if dt_selector is not None:
-        opt_sel = torch.optim.AdamW(dt_selector.parameters(), lr=model_cfg.lr_selector, weight_decay=0.05)
 
     amp_dtype = torch.bfloat16  # match original-style BF16
     #    scaler = GradScaler('cuda', enabled=(amp_dtype is torch.float16))
@@ -318,14 +302,14 @@ def main():
     cfg = CFG(runtime_cfg=runtime_cfg, model_cfg=model_cfg, wandb_cfg=wandb_cfg)
 
     # ----- eval/infer early exit -----
-    if runtime_cfg.mode != "train":
+    if runtime_cfg.mode == "inference":
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
         inference(cfg,
-                     ema_model,
-                     vae=vae,
-                     num_generations=runtime_cfg.inference_num_generations,
-                     fid_stats_path=runtime_cfg.fid_stats)
+                  ema_model,
+                  vae=vae,
+                  num_generations=runtime_cfg.inference_num_generations,
+                  fid_stats_path=runtime_cfg.fid_stats)
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
         return
@@ -366,10 +350,6 @@ def main():
             x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
         elif model_cfg.train_type == 'shortcut_cont':
             x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
-        elif model_cfg.train_type == 'adaptive_step':
-            x_t, v_t, t_vec, dt_vec, labels_eff, _ = get_targets(cfg, gen, batch_images, batch_labels, call_model, step,
-                                                                 dt_selector=dt_selector, selector_mode="discrete",
-                                                                 selector_exploration_p=0.1)
         else:
             raise ValueError(f"Unknown train_type: {model_cfg.train_type}")
 
