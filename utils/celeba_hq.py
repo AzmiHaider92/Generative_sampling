@@ -53,6 +53,7 @@ class FlatImageFolderSafe(Dataset):
             files = files[:debug_overfit]
 
         self.files = files
+        self.image_size = image_size
         self.T = _build_transform(image_size)
         # optional quick filter pass (cheap) — drop zero-byte files
         self.files = [f for f in self.files if (os.path.getsize(f) > 0)]
@@ -81,7 +82,8 @@ class FlatImageFolderSafe(Dataset):
                     break
         if x is None:
             # As a last resort, return a dummy (keeps batch shapes aligned)
-            x = torch.zeros(3, self.T.transforms[1].size, self.T.transforms[1].size)
+            x = torch.full((3, self.image_size, self.image_size), -1.0)
+            #x = torch.zeros(3, self.T.transforms[1].size, self.T.transforms[1].size)
         y = 0
         return x, y
 
@@ -111,6 +113,7 @@ def _get_celeba_iter(root: str, per_rank_bs: int, train: bool, debug_overfit: in
     loader = DataLoader(
         dataset,
         batch_size=per_rank_bs,
+        sampler=sampler,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=(torch.cuda.is_available() and num_workers > 0),

@@ -391,8 +391,8 @@ def main():
                     p_ema.data.mul_(EMA_DECAY).add_(p.data.float(), alpha=1 - EMA_DECAY)  # keep EMA in fp32
 
         # log (every log_interval)
-        lr = lr_sched(step)
-        for g in opt.param_groups: g['lr'] = lr
+        #lr = lr_sched(step)
+        #for g in opt.param_groups: g['lr'] = lr
 
         if (step % runtime_cfg.log_interval) == 0:
             # cheap scalars on every rank, averaged like JAX
@@ -420,7 +420,7 @@ def main():
                 wandb.log({
                     "training/loss": train_loss_mean,
                     "training/v_magnitude_prime": vmag_mean,
-                    "training/lr": lr,
+                    "training/lr": cfg.model_cfg.lr,
                     "training/loss_valid": v_loss,
                 }, step=step)
 
