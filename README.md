@@ -127,7 +127,7 @@ We follow the official paper and JAX repo.
 The code has comments based on the following 1-5.
 
 
-##### 1. Sample Step Size `dt` (Bootstrap Slice)
+### 1. Sample Step Size `dt` (Bootstrap Slice)
 
 For a bootstrap sub-batch:
 
@@ -140,18 +140,16 @@ For a bootstrap sub-batch:
 - Teacher level code: `k + 1` 
 - Step sizes: `dt = 2^{-k}` and `dt/2`
 
----
 
-##### 2. Sample Start Time `t` (Bootstrap Slice)
+### 2. Sample Start Time `t` (Bootstrap Slice)
 
 Given chosen $$dt$$:
 
 - Uniform sample: `t ∈ {0, dt, 2dt, ..., 1 - dt}`
 - Construct $$x_t$$ on the linear path (with $$\varepsilon$$).
 
----
 
-##### 3. Bootstrap “Shortcut” Teacher (Local Target)
+### 3. Bootstrap “Shortcut” Teacher (Local Target)
 
 Use a two-call Heun (trapezoid) estimate at the half-step level:
 
@@ -180,9 +178,9 @@ Loss:
 
 $$\big\| v_{\text{pred}} - v_{\text{target}} \big\|_2^2.$$
 
----
 
-##### 4. Flow-Matching Targets (Global Supervision)
+
+### 4. Flow-Matching Targets (Global Supervision)
 
 For the remaining batch items:
 
@@ -209,9 +207,9 @@ $$
 
 Concatenate both subsets and average/sum their losses.
 
----
 
-#### Control Flags
+
+### Control Flags
 
 - **`bootstrap_every`**  
   Fraction of the mini-batch used for bootstrap.  
@@ -233,9 +231,8 @@ Concatenate both subsets and average/sum their losses.
   - On: teacher uses EMA weights (recommended).  
   - Off: teacher uses live weights (cheaper, noisier).
 
----
 
-#### Practical Defaults
+### Practical Defaults
 
 Recommended settings:
 
