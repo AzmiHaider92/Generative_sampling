@@ -5,7 +5,7 @@ We implement a function that provides training targets (which differ across meth
 `(x_t, v_t, t, k) = get_targets(method = flow_matching / shortcut / ...)`
 
 - `k` is the level-code parameter used to encode `dt` (the step size); used only in certain methods.
-- The DiT model takes inputs `(x_t, t)` (and optionally `k`, `y`) and outputs `v_hat`.
+- The DiT model takes inputs `(x_t, t, y)` (and optionally `k`) and outputs `v_hat`.
 - Loss: mean squared error between target and prediction:
 
 $$
@@ -14,11 +14,11 @@ $$
 
 ---
 
-## Basic: Flow Matching
+## Flow Matching
 
 ### Setup
 
-Given a data sample \(x_1\) and Gaussian noise \(x_0 \sim \mathcal{N}(0, I)\), define the linear flow:
+Given a data sample \(x_1\) and Gaussian noise $$\(x_0 \sim \mathcal{N}(0, I)\)$$, define the linear flow:
 
 $$
 x_t = (1 - t)\,x_0 + t\,x_1,\quad t \in [0, 1].
@@ -69,7 +69,7 @@ For a mini-batch of size \(B\):
 
 ### Training Objective
 
-Model \(f_\theta(x, t, k, y)\) predicts velocity:
+Model $$\(f_\theta(x, t, k, y)\)$$ predicts velocity:
 
 $$
 \mathcal{L}_{\text{FM}}
