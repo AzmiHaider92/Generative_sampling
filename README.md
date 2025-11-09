@@ -54,10 +54,10 @@ For a mini-batch of size \(B\):
    The code includes two time sampling methods:
    (a) via a Kumaraswamy($$\(\rho=2\)$$) transform (Beta(2,2)-like), then clamp to \([0.02, 0.98]\):
 
-   - Sample $$\(u \sim \mathcal{U}(0,1)\) $$
+   - Sample $$\(u \sim \mathcal{U}(0,1)\)$$
    - Set $$\(t = \big(1 - (1-u)^{1/\rho}\big)^{1/\rho}\)$$
 
-   (b) A uniform bin sampling - $${0,1/N,2/N, ..., 127/N}$$, where `N` is the `denoise_timesteps` parameter. 
+   (b) A uniform bin sampling - $${0,1/T,2/T, ..., 127/T}$$, where `T` is the `denoise_timesteps` parameter. 
 
 4. **Noise & flow pairs**
 
@@ -72,7 +72,7 @@ For a mini-batch of size \(B\):
 
 ### Training Objective
 
-Model $$f_\theta(x, t, k, y)$$ predicts velocity:
+DiT model $$f_\theta(x, t, k, y)$$ predicts velocity:
 
 $$
 \mathcal{L}_{\text{FM}}
@@ -83,7 +83,7 @@ where $$y_{\text{eff}}\$$ are labels after dropout.
 
 ### Inference (Uniform N Steps)
 
-Use Euler with uniform steps \(\Delta t = 1/N\):
+Use Euler with uniform steps \(\Delta t = 1/T\):
 
 $$
 x \leftarrow x + \Delta t \cdot f_\theta(x, t, k, y),
@@ -94,7 +94,7 @@ with \(t\) advanced on a fixed grid (e.g. midpoints).
 ### Notes
 
 - Beta(2,2)-style sampling and clamping away from endpoints improve stability.
-- Sentinel level code \(k = K\) keeps compatibility with \(k\)-conditioned shortcut models.
+- Sentinel level code $$\(k = K\)$$ keeps compatibility with $$\(k\)$$-conditioned shortcut models.
 
 ---
 
