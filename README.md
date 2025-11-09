@@ -112,7 +112,7 @@ We follow the official paper and JAX repo, with added flexibility.
 - Dyadic level $$k$$ encodes step size: $$dt = 2^{-k}$$
 
 - Time $$t \in [0,1]$$ and level $$k$$ have separate embeddings.  
-- $$x_t = (1 - (1-\varepsilon)t)\,x_0 + t\,x_1.$$
+- $$x_t = (1 - (1-\varepsilon)t) x_0 + t x_1.$$
 
 ---
 
