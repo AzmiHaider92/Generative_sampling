@@ -245,25 +245,3 @@ Implementation notes:
 
 ---
 
-## Sampling in Shortcut Models (Official Implementation)
-
-Let:
-
-- $$M = 128$$ (total discretization steps)  
-- $$log_2(M) = 7$$
-
-The actual scheme:
-
-- Step sizes: `d ∈ {1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64}`
-
-- Smallest step is \(1/64\), not \(1/128\), because self-consistency uses two steps of size \(d/2\).  
-- For each $$d$$, start times: $$t \in \{0, d, 2d, \dots, 1-d\}$$
-
-- With `bootstrap_dt_bias = 0`, each dyadic step size appears with equal frequency → uniform over log step sizes.
-
-This yields structured coverage across scales, but the distribution is **fixed** and **not adaptive** to model difficulty.
-
-Our adaptive method modifies the \((t, d)\) sampling distribution based on model error.
-
----
-
