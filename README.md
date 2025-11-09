@@ -58,7 +58,7 @@ For a mini-batch of size \(B\):
    - Sample $$\(u \sim \mathcal{U}(0,1)\)$$
    - Set $$\(t = \big(1 - (1-u)^{1/\rho}\big)^{1/\rho}\)$$
 
-   (b) A uniform bin sampling - $${0,1/T,2/T, ..., 127/T}$$, where `T` is the `denoise_timesteps` parameter. 
+   (b) A uniform bin sampling - `{0,1/T,2/T, ..., 127/T}`, where `T` is the `denoise_timesteps` parameter. 
 
 4. **Noise & flow pairs**
 
