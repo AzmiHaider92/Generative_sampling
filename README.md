@@ -20,7 +20,7 @@ $$
 `papers/flow_matching.py`
 
 
-### Setup
+#### Setup
 
 Given a data sample $$x_1$$ and Gaussian noise $$x_0 \sim \mathcal{N}(0, I)$$, define the linear flow:
 
@@ -46,7 +46,7 @@ $$
 v_t = x_1 - (1-\varepsilon)x_0.
 $$
 
-### Batch Construction
+#### Batch Construction
 
 For a mini-batch of size \(B\):
 
@@ -75,7 +75,7 @@ For a mini-batch of size \(B\):
    - Let `T = denoise_timesteps`, $$K = log_2 T$$
    - Attach constant level code $$k = K$$ (ignored in pure FM; keeps interface compatible)
 
-### Training Objective
+#### Training Objective
 
 DiT model $$f_\theta(x, t, k, y)$$ predicts velocity:
 
@@ -88,7 +88,7 @@ $$
 
 where $$y_{\text{eff}}\$$ are labels after dropout.
 
-### Inference (Uniform N Steps)
+#### Inference (Uniform N Steps)
 
 Use Euler with uniform steps $$\Delta t = 1/T$$:
 
@@ -98,7 +98,7 @@ $$
 
 with \(t\) advanced on a fixed grid (e.g. midpoints).
 
-### Notes
+#### Notes
 
 - Beta(2,2)-style sampling and clamping away from endpoints improve stability.
 - Sentinel level code $$\(k = K\)$$ keeps compatibility with $$\(k\)$$-conditioned shortcut models.
@@ -112,7 +112,7 @@ with \(t\) advanced on a fixed grid (e.g. midpoints).
 
 We follow the official paper and JAX repo.
 
-### Notation
+#### Notation
 
 - $$T$$: (power-of-two) number of denoising bins  
 - $$K = log_2 T$$  
@@ -123,11 +123,11 @@ We follow the official paper and JAX repo.
 
 ---
 
-## Shortcut Model Training Procedure
+#### Shortcut Model Training Procedure
 The code has comments based on the following 1-5.
 
 
-### 1. Sample Step Size `dt` (Bootstrap Slice)
+##### 1. Sample Step Size `dt` (Bootstrap Slice)
 
 For a bootstrap sub-batch:
 
@@ -142,7 +142,7 @@ For a bootstrap sub-batch:
 
 ---
 
-### 2. Sample Start Time `t` (Bootstrap Slice)
+##### 2. Sample Start Time `t` (Bootstrap Slice)
 
 Given chosen $$dt$$:
 
@@ -151,7 +151,7 @@ Given chosen $$dt$$:
 
 ---
 
-### 3. Bootstrap “Shortcut” Teacher (Local Target)
+##### 3. Bootstrap “Shortcut” Teacher (Local Target)
 
 Use a two-call Heun (trapezoid) estimate at the half-step level:
 
@@ -182,7 +182,7 @@ $$\big\| v_{\text{pred}} - v_{\text{target}} \big\|_2^2.$$
 
 ---
 
-### 4. Flow-Matching Targets (Global Supervision)
+##### 4. Flow-Matching Targets (Global Supervision)
 
 For the remaining batch items:
 
@@ -211,7 +211,7 @@ Concatenate both subsets and average/sum their losses.
 
 ---
 
-## Control Flags
+#### Control Flags
 
 - **`bootstrap_every`**  
   Fraction of the mini-batch used for bootstrap.  
@@ -235,7 +235,7 @@ Concatenate both subsets and average/sum their losses.
 
 ---
 
-## Practical Defaults
+#### Practical Defaults
 
 Recommended settings:
 
