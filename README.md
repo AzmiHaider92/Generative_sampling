@@ -139,7 +139,7 @@ For a bootstrap sub-batch:
 
 Given chosen $$dt$$:
 
-- Uniform sample: $$t \in \{0 , dt, 2dt, \dots, 1 - dt\}$$
+- Uniform sample: `t ∈ {0, dt, 2dt, ..., 1 - dt}`
 - Construct $$x_t$$ on the linear path (with $$\varepsilon$$).
 
 ---
