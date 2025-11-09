@@ -1,3 +1,5 @@
+This repository is an unofficial PyTorch implementation of [One Step Diffusion via Shortcut Models](https://arxiv.org/abs/2410.12557) with added explanations and practical notes on the shortcut training scheme and sampling behavior.
+
 ## Technical Implementation of Shortcut Model (per official repo)
 
 We implement a function that provides training targets (which differ across methods such as flow matching, shortcut models, consistency models, etc.):
@@ -15,6 +17,8 @@ $$
 ---
 
 ## Flow Matching
+`papers/flow_matching.py`
+
 
 ### Setup
 
@@ -103,7 +107,10 @@ with \(t\) advanced on a fixed grid (e.g. midpoints).
 
 ## Shortcut Models
 
-We follow the official paper and JAX repo, with added flexibility.
+`papers/shortcut.py`
+
+
+We follow the official paper and JAX repo.
 
 ### Notation
 
@@ -245,3 +252,11 @@ Implementation notes:
 
 ---
 
+
+## Continuous Shortcut Models
+
+`papers/shortcut_cont.py`
+
+In this version, we implement conitnous time and step sizes (as opposed to power of two and bins in the official shortcut models)
+
+`dt ~ U[dt_min, 1]` and `t~U[0, 1-dt]` 
