@@ -86,7 +86,7 @@ where $$y_{\text{eff}}\$$ are labels after dropout.
 
 ### Inference (Uniform N Steps)
 
-Use Euler with uniform steps \(\Delta t = 1/T\):
+Use Euler with uniform steps `\Delta t = 1/T`:
 
 $$
 x \leftarrow x + \Delta t \cdot f_\theta(x, t, k, y),
