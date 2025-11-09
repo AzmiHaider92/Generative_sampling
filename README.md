@@ -52,7 +52,8 @@ For a mini-batch of size \(B\):
 
 2. **Sample times** 
    The code includes two time sampling methods:
-   (a) via a Kumaraswamy($$\(\rho=2\)$$) transform (Beta(2,2)-like), then clamp to \([0.02, 0.98]\):
+   
+   (a) via a Kumaraswamy($$\rho=2$$) transform (Beta(2,2)-like), then clamp to \([0.02, 0.98]\):
 
    - Sample $$\(u \sim \mathcal{U}(0,1)\)$$
    - Set $$\(t = \big(1 - (1-u)^{1/\rho}\big)^{1/\rho}\)$$
@@ -62,8 +63,8 @@ For a mini-batch of size \(B\):
 4. **Noise & flow pairs**
 
    - Sample $$\(x_0 \sim \mathcal{N}(0, I)\)$$
-   - Set $$\(x_t = (1-t)x_0 + t x_1\)$$
-   - Set $$\(v_t = x_1 - x_0\)$$
+   - Set $$x_t = (1-t)x_0 + t x_1$$
+   - Set $$v_t = x_1 - x_0$$
 
 5. **Level code (sentinel)**
 
@@ -76,7 +77,7 @@ DiT model $$f_\theta(x, t, k, y)$$ predicts velocity:
 
 $$
 \mathcal{L}_{\text{FM}}
-= \mathbb{E}\Big[\big\|| f_\theta(x_t, t, k{=}K, y_{\text{eff}}) - v_t \big\||_2^2\Big],
+= \mathbb{E} || f_\theta(x_t, t, k{=}K, y_{\text{eff}}) - v_t ||_2^2],
 $$
 
 where $$y_{\text{eff}}\$$ are labels after dropout.
