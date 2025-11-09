@@ -121,7 +121,6 @@ We follow the official paper and JAX repo.
 - Time $$t \in [0,1]$$ and level $$k$$ have separate embeddings.  
 - $$x_t = (1 - (1-\varepsilon)t) x_0 + t x_1.$$
 
----
 
 #### Shortcut Model Training Procedure
 The code has comments based on the following 1-5.
@@ -198,8 +197,6 @@ Train with:
 $$
 \big\|| f_\theta(x_t, t, \text{level}{=}k, y) - v_t \big\||_2^2.
 $$
-
----
 
 - Use:
   - $$B_{\text{boot}}$$ samples for shortcut bootstrap.  
