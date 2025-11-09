@@ -180,7 +180,7 @@ $$\big\| v_{\text{pred}} - v_{\text{target}} \big\|_2^2.$$
 
 For the remaining batch items:
 
-1. Sample $$t in {0,1/T, \dots, T-1/T$$.  
+1. Sample $$t in {0, 1/T, \dots, T-1/T}$$.  
 2. Build $$x_t$$ as above.  
 3. Set FM target:
 
