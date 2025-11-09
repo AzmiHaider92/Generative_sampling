@@ -76,7 +76,7 @@ DiT model $$f_\theta(x, t, k, y)$$ predicts velocity:
 
 $$
 \mathcal{L}_{\text{FM}}
-= \mathbb{E}\Big[\big\| f_\theta(x_t, t, k{=}K, y_{\text{eff}}) - v_t \big\|_2^2\Big],
+= \mathbb{E}\Big[\big\|| f_\theta(x_t, t, k{=}K, y_{\text{eff}}) - v_t \big\||_2^2\Big],
 $$
 
 where $$y_{\text{eff}}\$$ are labels after dropout.
@@ -146,11 +146,11 @@ Use a two-call Heun (trapezoid) estimate at the half-step level:
 
 1. **Predictor**
 
-   $$v_{b1} = f_{\text{teacher}}(x_t, t, \text{level}{+}1, y)$$
+   $$v_{b1} = f_{\text{teacher}}(x_t, t, k+1, y)$$
 
 2. **Half update**
 
-   $$x_{t_2} = \mathrm{clip}\big(x_t + \tfrac{dt}{2}\,v_{b1}, [-4, 4]\big)$$
+   $$x_{t_2} = \mathrm{clip}\big(x_t + \tfrac{dt}{2}\,v_{b1}, [-4, 4]\big)$$ ; 
    $$t_2 = t + \tfrac{dt}{2}$$
 
 3. **Corrector**
@@ -163,11 +163,11 @@ Use a two-call Heun (trapezoid) estimate at the half-step level:
 
 Student prediction at full level:
 
-$$v_{\text{pred}} = f_\theta(x_t, t, \text{level}, y)$$
+$$v_{\text{pred}} = f_\theta(x_t, t, k, y)$$
 
 Loss:
 
-$$\big\| v_{\text{pred}} - v_{\text{target}} \big\|_2^2.$$
+$$\big\|| v_{\text{pred}} - v_{\text{target}} \big\||_2^2.$$
 
 ---
 
@@ -179,9 +179,7 @@ For the remaining batch items:
 2. Build $$\(x_t\)$$ as above.  
 3. Set FM target:
 
-   $$
-   v_t = x_1 - (1-\varepsilon)x_0
-   $$
+   $$v_t = x_1 - (1-\varepsilon)x_0$$
 
 4. Apply label dropout for CFG.  
 5. Attach sentinel level code \(k = K\).
@@ -189,7 +187,7 @@ For the remaining batch items:
 Train with:
 
 $$
-\big\| f_\theta(x_t, t, \text{level}{=}k, y) - v_t \big\|_2^2.
+\big\|| f_\theta(x_t, t, \text{level}{=}k, y) - v_t \big\||_2^2.
 $$
 
 ---
