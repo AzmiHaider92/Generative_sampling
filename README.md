@@ -124,14 +124,14 @@ The code has comments based on the following 1-5.
 
 For a bootstrap sub-batch:
 
-- Sample levels $$k \in \{0, \dots, K-1\}$$.  
-- If batch size is smaller than number of levels, pad with \(k = 0\).
+- Sample levels `k ∈ {0, ..., K-1}`.
+- If batch size is smaller than number of levels, pad with `k = 0`.
 
 **Outputs:**
 
-- Student level code: $$k$$ 
-- Teacher level code: $$k + 1$$ 
-- Step sizes: $$dt = 2^{-k}$$ and $$dt/2$$
+- Student level code: `k` 
+- Teacher level code: `k + 1` 
+- Step sizes: `dt = 2^{-k}` and `dt/2`
 
 ---
 
