@@ -104,20 +104,16 @@ We follow the official paper and JAX repo, with added flexibility.
 
 ### Notation
 
-- $$\(T\)$$: (power-of-two) number of denoising bins  
-- $$\(K = \log_2 T\)$$  
-- Dyadic level $$\(k\)$$ encodes step size:
+- $$T$$: (power-of-two) number of denoising bins  
+- $$K = log_2 T$$  
+- Dyadic level $$k$$ encodes step size:
 
-  $$
-  dt = 2^{-k}
-  $$
+  $$dt = 2^{-k}$$
 
-- Time \(t \in [0,1]\) and level \(k\) have separate embeddings.  
+- Time $$t \in [0,1]$$ and level $$k$$ have separate embeddings.  
 - Use small \(\varepsilon \approx 10^{-5}\):
 
-  $$
-  x_t = (1 - (1-\varepsilon)t)\,x_0 + t\,x_1.
-  $$
+  $$x_t = (1 - (1-\varepsilon)t)\,x_0 + t\,x_1.$$
 
 ---
 
