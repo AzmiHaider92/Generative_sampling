@@ -106,14 +106,10 @@ We follow the official paper and JAX repo, with added flexibility.
 
 - $$T$$: (power-of-two) number of denoising bins  
 - $$K = log_2 T$$  
-- Dyadic level $$k$$ encodes step size:
-
-  $$dt = 2^{-k}$$
+- Dyadic level $$k$$ encodes step size: $$dt = 2^{-k}$$
 
 - Time $$t \in [0,1]$$ and level $$k$$ have separate embeddings.  
-- Use small \(\varepsilon \approx 10^{-5}\):
-
-  $$x_t = (1 - (1-\varepsilon)t)\,x_0 + t\,x_1.$$
+- $$x_t = (1 - (1-\varepsilon)t)\,x_0 + t\,x_1.$$
 
 ---
 
@@ -128,23 +124,19 @@ For a bootstrap sub-batch:
 
 **Outputs:**
 
-- Student level code: $$\(k\)$$ 
-- Teacher level code: $$\(k + 1\)$$ 
-- Step sizes: $$\(dt = 2^{-k}\) and \(dt/2\)$$
+- Student level code: $$k$$ 
+- Teacher level code: $$k + 1$$ 
+- Step sizes: $$dt = 2^{-k}$$ and $$dt/2$$
 
 ---
 
 ### 2. Sample Start Time `t` (Bootstrap Slice)
 
-Given chosen $$\(dt\)$$:
+Given chosen $$dt$$:
 
 - Sample:
-
-  $$
-  t \in \{0, dt, 2dt, \dots, 1 - dt\}
-  $$
-
-- Construct $$\(x_t\)$$ on the linear path (with $$\(\varepsilon\))$$.
+  $$t \in \{0, dt, 2dt, \dots, 1 - dt\}$$
+- Construct $$x_t$$ on the linear path (with $$\varepsilon$$.
 
 ---
 
