@@ -117,12 +117,14 @@ We follow the official paper and JAX repo, with added flexibility.
 ---
 
 ## Shortcut Model Training Procedure
+The code has comments based on the following 1-5.
+
 
 ### 1. Sample Step Size `dt` (Bootstrap Slice)
 
 For a bootstrap sub-batch:
 
-- Sample levels $$\(k \in \{0, \dots, K-1\}\)$$.  
+- Sample levels $$k \in \{0, \dots, K-1\}$$.  
 - If batch size is smaller than number of levels, pad with \(k = 0\).
 
 **Outputs:**
@@ -158,7 +160,7 @@ Use a two-call Heun (trapezoid) estimate at the half-step level:
 
 3. **Corrector**
 
-   $$v_{b2} = f_{\text{teacher}}(x_{t_2}, t_2, \text{level}{+}1, y)$$
+   $$v_{b2} = f_{\text{teacher}}(x_{t_2}, t_2, k+1, y)$$
 
 4. **Local target**
 
@@ -170,7 +172,7 @@ $$v_{\text{pred}} = f_\theta(x_t, t, k, y)$$
 
 Loss:
 
-$$\big\|| v_{\text{pred}} - v_{\text{target}} \big\||_2^2.$$
+$$\big\| v_{\text{pred}} - v_{\text{target}} \big\|_2^2.$$
 
 ---
 
@@ -178,8 +180,8 @@ $$\big\|| v_{\text{pred}} - v_{\text{target}} \big\||_2^2.$$
 
 For the remaining batch items:
 
-1. Sample $$\(t \sim \{0, \dots, T-1\}/T\)$$.  
-2. Build $$\(x_t\)$$ as above.  
+1. Sample $$t in {0,1/T, \dots, T-1/T$$.  
+2. Build $$x_t$$ as above.  
 3. Set FM target:
 
    $$v_t = x_1 - (1-\varepsilon)x_0$$
@@ -197,16 +199,14 @@ $$
 
 ## Merge, Loss, and Diagnostics
 
-- Let per-rank batch size be \(B\).  
+- Let per-rank batch size be $$B$$.  
 - Let
 
-  $$
-  B_{\text{boot}} = \left\lfloor \frac{B}{\texttt{bootstrap\_every}} \right\rfloor.
-  $$
+  $$B_{\text{boot}} = \left\lfloor \frac{B}{\texttt{bootstrap\_every}} \right\rfloor.$$
 
 - Use:
-  - \(B_{\text{boot}}\) samples for shortcut bootstrap.  
-  - \(B - B_{\text{boot}}\) samples for FM.
+  - $$B_{\text{boot}}$$ samples for shortcut bootstrap.  
+  - $$B - B_{\text{boot}}$$ samples for FM.
 
 Concatenate both subsets and average/sum their losses.
 
@@ -220,15 +220,13 @@ Concatenate both subsets and average/sum their losses.
 
 - **`bootstrap_dt_bias`**  
   (Bins scheme only)  
-  - `0`: uniform over levels \(k\).  
-  - `>0`: bias towards coarser steps (small \(k\), large `dt`), still covering finer levels.
+  - `0`: uniform over levels $$k$$.  
+  - `>0`: bias towards coarser steps (small $$k$$, large `dt`), still covering finer levels.
 
 - **`bootstrap_cfg`**  
   Enables CFG inside teacher:
 
-  $$
-  v_{\text{cfg}} = v_{\text{uncond}} + s\,(v_{\text{cond}} - v_{\text{uncond}})
-  $$
+  $$v_{\text{cfg}} = v_{\text{uncond}} + s\,(v_{\text{cond}} - v_{\text{uncond}})$$
 
   Student matches this guided target.
 
@@ -259,23 +257,19 @@ Implementation notes:
 
 Let:
 
-- \(M = 128\) (total discretization steps)  
-- \(\log_2(M) = 7\)
+- $$M = 128$$ (total discretization steps)  
+- $$log_2(M) = 7$$
 
 The actual scheme:
 
 - Step sizes:
 
-  $$
-  d \in \{1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64\}
-  $$
+  $$d \in \{1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64\}$$
 
 - Smallest step is \(1/64\), not \(1/128\), because self-consistency uses two steps of size \(d/2\).  
 - For each \(d\), start times:
 
-  $$
-  t \in \{0, d, 2d, \dots, 1-d\}
-  $$
+  $$t \in \{0, d, 2d, \dots, 1-d\}$$
 
 - With `bootstrap_dt_bias = 0`, each dyadic step size appears with equal frequency → uniform over log step sizes.
 
@@ -285,17 +279,3 @@ Our adaptive method modifies the \((t, d)\) sampling distribution based on model
 
 ---
 
-## Notes on Paper vs Code
-
-- Paper states:
-  - \(t \sim \text{Uniform}[0,1]\)
-  - \(d\) uniformly from \(\{1/M, 2/M, \dots, 1\}\)
-- This uniform \(p_{\text{uni}}(t, d)\) is suboptimal:
-  - Long-range shortcuts (large \(d\)) and high-noise regions (small \(t\)) are harder.
-  - Difficulty is not uniform across \((t, d)\).
-
-- In the code:
-  - They use `dt` and `dt/2` as (step, half-step).  
-  - Paper uses \(2dt\) and \(dt\).  
-
-Be careful when mapping between notations; logic is consistent, only symbols differ.
