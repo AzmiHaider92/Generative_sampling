@@ -52,12 +52,12 @@ For a mini-batch of size \(B\):
 
 2. **Sample times** 
    The code includes two time sampling methods:
-   (a) via a Kumaraswamy(\(\rho=2\)) transform (Beta(2,2)-like), then clamp to \([0.02, 0.98]\):
+   (a) via a Kumaraswamy($$\(\rho=2\)$$) transform (Beta(2,2)-like), then clamp to \([0.02, 0.98]\):
 
-   - Sample \(u \sim \mathcal{U}(0,1)\)  
-   - Set \(t = \big(1 - (1-u)^{1/\rho}\big)^{1/\rho}\)
+   - Sample $$\(u \sim \mathcal{U}(0,1)\) $$
+   - Set $$\(t = \big(1 - (1-u)^{1/\rho}\big)^{1/\rho}\)$$
 
-   (b) A uniform bin sampling - {0,1/N,2/N, ..., 127/N}, where `N` is the `denoise_timesteps` parameter. 
+   (b) A uniform bin sampling - $${0,1/N,2/N, ..., 127/N}$$, where `N` is the `denoise_timesteps` parameter. 
 
 4. **Noise & flow pairs**
 
