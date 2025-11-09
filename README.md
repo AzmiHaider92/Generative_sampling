@@ -146,41 +146,28 @@ Use a two-call Heun (trapezoid) estimate at the half-step level:
 
 1. **Predictor**
 
-   $$
-   v_{b1} = f_{\text{teacher}}(x_t, t, \text{level}{+}1, y)
-   $$
+   $$v_{b1} = f_{\text{teacher}}(x_t, t, \text{level}{+}1, y)$$
 
 2. **Half update**
 
-   $$
-   x_{t_2} = \mathrm{clip}\big(x_t + \tfrac{dt}{2}\,v_{b1}, [-4, 4]\big),
-   \quad
-   t_2 = t + \tfrac{dt}{2}
-   $$
+   $$x_{t_2} = \mathrm{clip}\big(x_t + \tfrac{dt}{2}\,v_{b1}, [-4, 4]\big)$$
+   $$t_2 = t + \tfrac{dt}{2}$$
 
 3. **Corrector**
 
-   $$
-   v_{b2} = f_{\text{teacher}}(x_{t_2}, t_2, \text{level}{+}1, y)
-   $$
+   $$v_{b2} = f_{\text{teacher}}(x_{t_2}, t_2, \text{level}{+}1, y)$$
 
 4. **Local target**
 
-   $$
-   v_{\text{target}} = \tfrac12\,(v_{b1} + v_{b2})
-   $$
+   $$v_{\text{target}} = \tfrac12\,(v_{b1} + v_{b2})$$
 
 Student prediction at full level:
 
-$$
-v_{\text{pred}} = f_\theta(x_t, t, \text{level}, y)
-$$
+$$v_{\text{pred}} = f_\theta(x_t, t, \text{level}, y)$$
 
 Loss:
 
-$$
-\big\| v_{\text{pred}} - v_{\text{target}} \big\|_2^2.
-$$
+$$\big\| v_{\text{pred}} - v_{\text{target}} \big\|_2^2.$$
 
 ---
 
