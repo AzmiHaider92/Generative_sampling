@@ -104,9 +104,9 @@ We follow the official paper and JAX repo, with added flexibility.
 
 ### Notation
 
-- \(T\): (power-of-two) number of denoising bins  
-- \(K = \log_2 T\)  
-- Dyadic level \(k\) encodes step size:
+- $$\(T\)$$: (power-of-two) number of denoising bins  
+- $$\(K = \log_2 T\)$$  
+- Dyadic level $$\(k\)$$ encodes step size:
 
   $$
   dt = 2^{-k}
@@ -127,20 +127,20 @@ We follow the official paper and JAX repo, with added flexibility.
 
 For a bootstrap sub-batch:
 
-- Sample levels \(k \in \{0, \dots, K-1\}\) (uniform or biased to coarse steps).  
+- Sample levels $$\(k \in \{0, \dots, K-1\}\)$$.  
 - If batch size is smaller than number of levels, pad with \(k = 0\).
 
 **Outputs:**
 
-- Student level code: \(k\)  
-- Teacher level code: \(k + 1\)  
-- Step sizes: \(dt = 2^{-k}\) and \(dt/2\)
+- Student level code: $$\(k\)$$ 
+- Teacher level code: $$\(k + 1\)$$ 
+- Step sizes: $$\(dt = 2^{-k}\) and \(dt/2\)$$
 
 ---
 
 ### 2. Sample Start Time `t` (Bootstrap Slice)
 
-Given chosen \(dt\):
+Given chosen $$\(dt\)$$:
 
 - Sample:
 
@@ -148,12 +148,7 @@ Given chosen \(dt\):
   t \in \{0, dt, 2dt, \dots, 1 - dt\}
   $$
 
-- Construct \(x_t\) on the linear path (with \(\varepsilon\)).
-
-**Outputs:**
-
-- Start time \(t\)  
-- State \(x_t\)
+- Construct $$\(x_t\)$$ on the linear path (with $$\(\varepsilon\))$$.
 
 ---
 
@@ -199,19 +194,14 @@ $$
 \big\| v_{\text{pred}} - v_{\text{target}} \big\|_2^2.
 $$
 
-Options:
-
-- Use CFG inside teacher.  
-- Use EMA weights for teacher.
-
 ---
 
 ### 4. Flow-Matching Targets (Global Supervision)
 
 For the remaining batch items:
 
-1. Sample \(t \sim \{0, \dots, T-1\}/T\).  
-2. Build \(x_t\) as above.  
+1. Sample $$\(t \sim \{0, \dots, T-1\}/T\)$$.  
+2. Build $$\(x_t\)$$ as above.  
 3. Set FM target:
 
    $$
