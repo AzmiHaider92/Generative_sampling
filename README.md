@@ -77,8 +77,9 @@ DiT model $$f_\theta(x, t, k, y)$$ predicts velocity:
 
 $$
 \mathcal{L}_{\text{FM}}
-= \mathbb{E} || f_\theta(x_t, t, k{=}K, y_{\text{eff}}) - v_t ||_2^2],
+= \mathbb{E}\big[ \| f_\theta(x_t, t, k{=}K, y_{\text{eff}}) - v_t \|_2^2 \big].
 $$
+
 
 where $$y_{\text{eff}}\$$ are labels after dropout.
 
