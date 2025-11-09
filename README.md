@@ -1,17 +1,16 @@
 This repository is an unofficial PyTorch implementation of [One Step Diffusion via Shortcut Models](https://arxiv.org/abs/2410.12557) with added explanations and practical notes on the shortcut training scheme and sampling behavior.
 
-Results on Imagenet and CelebA (256x256) - DiT-B/2:
 
 ### FID-50k vs. Denoising Steps (DiT-B/2)
 
-**CelebA_HQ (unconditioned)**
+**CelebA_HQ 256x256 (unconditioned)**
 
 | Method           | 128   | 64    | 32    | 16    | 8     | 4      | 2      | 1      |
 |------------------|-------|-------|-------|-------|-------|--------|--------|--------|
 | Flow Matching    | 9.41  | 9.64  | 10.40 | 13.04 | 21.80 | 52.67  | 122.32 | 261.38 |
 | Shortcut Models  | 6.37  | 6.77  | 7.93  | 9.30  | 10.84 | 12.53  | 14.36  | 17.28  |
 
-**ImageNet (class-conditioned)**
+**ImageNet 256x256 (class-conditioned)**
 
 | Method           | 128   | 64    | 32    | 16    | 8     | 4      | 2      | 1      |
 |------------------|-------|-------|-------|-------|-------|--------|--------|--------|
@@ -50,7 +49,7 @@ Results on Imagenet and CelebA (256x256) - DiT-B/2:
 </p>
 
 <p align="center">
-  <em>Left: Flow Matching. Right: Shortcut Models. Top → bottom: denoising steps = {1, 2, 4, 8, 16, 32, 64, 128}. Dataset: CelebA-HQ.</em>
+  <em>Left: Flow Matching. Right: Shortcut Models. Top → bottom: denoising steps = {1, 2, 4, 8, 16, 32, 64, 128}. </em>
 </p>
 
 
@@ -84,7 +83,7 @@ Results on Imagenet and CelebA (256x256) - DiT-B/2:
 </p>
 
 <p align="center">
-  <em>Left: Flow Matching. Right: Shortcut Models. Top → bottom: denoising steps = {1, 2, 4, 8, 16, 32, 64, 128}. Dataset: ImageNet.</em>
+  <em>Left: Flow Matching. Right: Shortcut Models. Top → bottom: denoising steps = {1, 2, 4, 8, 16, 32, 64, 128}.</em>
 </p>
 
 
