@@ -62,7 +62,7 @@ For a mini-batch of size \(B\):
 
 4. **Noise & flow pairs**
 
-   - Sample $$\(x_0 \sim \mathcal{N}(0, I)\)$$
+   - Sample $$x_0 \sim \mathcal{N}(0, I)$$
    - Set $$x_t = (1-t)x_0 + t x_1$$
    - Set $$v_t = x_1 - x_0$$
 
@@ -139,9 +139,9 @@ For a bootstrap sub-batch:
 
 Given chosen $$dt$$:
 
-- Sample:
-  $$t \in \{0, dt, 2dt, \dots, 1 - dt\}$$
-- Construct $$x_t$$ on the linear path (with $$\varepsilon$$.
+- Uniform sample:
+  $$t \in {0, dt, 2dt, \dots, 1 - dt}$$
+- Construct $$x_t$$ on the linear path (with $$\varepsilon$$).
 
 ---
 
@@ -164,7 +164,7 @@ Use a two-call Heun (trapezoid) estimate at the half-step level:
 
 4. **Local target**
 
-   $$v_{\text{target}} = \tfrac12\,(v_{b1} + v_{b2})$$
+   $$v_{text{target}} = \tfrac12\,(v_{b1} + v_{b2})$$
 
 Student prediction at full level:
 
@@ -253,7 +253,7 @@ Implementation notes:
 
 ---
 
-## Actual Sampling in Shortcut Models (Official Implementation)
+## Sampling in Shortcut Models (Official Implementation)
 
 Let:
 
@@ -262,7 +262,7 @@ Let:
 
 The actual scheme:
 
-- Step sizes: $$d \in \{1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64\}$$
+- Step sizes: $$d \in {1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64}$$
 
 - Smallest step is \(1/64\), not \(1/128\), because self-consistency uses two steps of size \(d/2\).  
 - For each $$d$$, start times: $$t \in \{0, d, 2d, \dots, 1-d\}$$
