@@ -67,19 +67,19 @@ For a mini-batch of size \(B\):
 
 5. **Level code (sentinel)**
 
-   - Let `T = denoise_timesteps`, $$ K = \log_2 T $$
-   - Attach constant level code $$k = K $$ (ignored in pure FM; keeps interface compatible)
+   - Let `T = denoise_timesteps`, $$K = log_2 T$$
+   - Attach constant level code $$k = K$$ (ignored in pure FM; keeps interface compatible)
 
 ### Training Objective
 
-Model $$ f_\theta(x, t, k, y) $$ predicts velocity:
+Model $$f_\theta(x, t, k, y)$$ predicts velocity:
 
 $$
 \mathcal{L}_{\text{FM}}
 = \mathbb{E}\Big[\big\| f_\theta(x_t, t, k{=}K, y_{\text{eff}}) - v_t \big\|_2^2\Big],
 $$
 
-where $$ y_{\text{eff}}\ $$ are labels after dropout.
+where $$y_{\text{eff}}\$$ are labels after dropout.
 
 ### Inference (Uniform N Steps)
 
