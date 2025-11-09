@@ -254,7 +254,7 @@ Let:
 
 The actual scheme:
 
-- Step sizes: $$d \in {1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64}$$
+- Step sizes: `d ∈ {1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64}`
 
 - Smallest step is \(1/64\), not \(1/128\), because self-consistency uses two steps of size \(d/2\).  
 - For each $$d$$, start times: $$t \in \{0, d, 2d, \dots, 1-d\}$$
