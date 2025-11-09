@@ -18,7 +18,7 @@ $$
 
 ### Setup
 
-Given a data sample \(x_1\) and Gaussian noise $$\(x_0 \sim \mathcal{N}(0, I)\)$$, define the linear flow:
+Given a data sample $$\(x_1\)$$ and Gaussian noise $$\(x_0 \sim \mathcal{N}(0, I)\)$$, define the linear flow:
 
 $$
 x_t = (1 - t)\,x_0 + t\,x_1,\quad t \in [0, 1].
@@ -30,7 +30,7 @@ $$
 v_t = \frac{\partial x_t}{\partial t} = x_1 - x_0.
 $$
 
-**Optional endpoint guard** (avoid degeneracy at \(t = 1\)):
+**Added endpoint guard** (avoid degeneracy at \(t = 1\)):
 
 $$
 x_t = (1 - (1-\varepsilon)t)\,x_0 + t\,x_1,\quad \varepsilon \approx 10^{-5},
@@ -50,19 +50,22 @@ For a mini-batch of size \(B\):
    With probability `class_dropout_prob`, replace label \(y\) by the unconditional id `num_classes`.  
    This enables classifier-free guidance at inference.
 
-2. **Sample times**  
-   Sample \(t\) via a Kumaraswamy(\(\rho=2\)) transform (Beta(2,2)-like), then clamp to \([0.02, 0.98]\):
+2. **Sample times** 
+   The code includes two time sampling methods:
+   (a) via a Kumaraswamy(\(\rho=2\)) transform (Beta(2,2)-like), then clamp to \([0.02, 0.98]\):
 
    - Sample \(u \sim \mathcal{U}(0,1)\)  
    - Set \(t = \big(1 - (1-u)^{1/\rho}\big)^{1/\rho}\)
 
-3. **Noise & flow pairs**
+   (b) A uniform bin sampling - {0,1/N,2/N, ..., 127/N}, where `N` is the `denoise_timesteps` parameter. 
+
+4. **Noise & flow pairs**
 
    - Sample \(x_0 \sim \mathcal{N}(0, I)\)
    - Set \(x_t = (1-t)x_0 + t x_1\)
    - Set \(v_t = x_1 - x_0\)
 
-4. **Level code (sentinel)**
+5. **Level code (sentinel)**
 
    - Let `T = denoise_timesteps`, \(K = \log_2 T\)
    - Attach constant level code \(k = K\) (ignored in pure FM; keeps interface compatible)
