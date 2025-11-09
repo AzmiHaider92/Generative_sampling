@@ -1,12 +1,332 @@
+## Technical Implementation of Shortcut Model (per official repo)
 
+We implement a function that provides training targets (which differ across methods such as flow matching, shortcut models, consistency models, etc.):
 
- are implementing the function that provides the targets (which is different between different methods: flow matching, shortcut models, consistency models,...):
+`(x_t, v_t, t, k) = get_targets(method = flow_matching / shortcut / ...)`
 
-\[
-(x_t, v_t, t, k) = \text{get\_targets(method=flow matching/shortcut/\dots)}.
-\]
+- `k` is the level-code parameter used to encode `dt` (the step size); used only in certain methods.
+- The DiT model takes inputs `(x_t, t)` (and optionally `k`, `y`) and outputs `v_hat`.
+- Loss: mean squared error between target and prediction:
 
-$k$ is the level code parameter used to encode $dt$ (the step size), it is used in certain methods only.
+$$
+\text{loss} = \mathrm{MSE}(v_t, \hat{v}_t)
+$$
 
-The rest of the code is the same where DiT model inputs $x_t, t$ (and optionally k) and outputs ${\hat{v_t}}$.
-The loss would be $mse(v_t, {\hat{v_t}})$.
+---
+
+## Basic: Flow Matching
+
+### Setup
+
+Given a data sample \(x_1\) and Gaussian noise \(x_0 \sim \mathcal{N}(0, I)\), define the linear flow:
+
+$$
+x_t = (1 - t)\,x_0 + t\,x_1,\quad t \in [0, 1].
+$$
+
+Velocity field (constant in \(t\)):
+
+$$
+v_t = \frac{\partial x_t}{\partial t} = x_1 - x_0.
+$$
+
+**Optional endpoint guard** (avoid degeneracy at \(t = 1\)):
+
+$$
+x_t = (1 - (1-\varepsilon)t)\,x_0 + t\,x_1,\quad \varepsilon \approx 10^{-5},
+$$
+
+which gives
+
+$$
+v_t = x_1 - (1-\varepsilon)x_0.
+$$
+
+### Batch Construction
+
+For a mini-batch of size \(B\):
+
+1. **Label dropout (CFG training)**  
+   With probability `class_dropout_prob`, replace label \(y\) by the unconditional id `num_classes`.  
+   This enables classifier-free guidance at inference.
+
+2. **Sample times**  
+   Sample \(t\) via a Kumaraswamy(\(\rho=2\)) transform (Beta(2,2)-like), then clamp to \([0.02, 0.98]\):
+
+   - Sample \(u \sim \mathcal{U}(0,1)\)  
+   - Set \(t = \big(1 - (1-u)^{1/\rho}\big)^{1/\rho}\)
+
+3. **Noise & flow pairs**
+
+   - Sample \(x_0 \sim \mathcal{N}(0, I)\)
+   - Set \(x_t = (1-t)x_0 + t x_1\)
+   - Set \(v_t = x_1 - x_0\)
+
+4. **Level code (sentinel)**
+
+   - Let `T = denoise_timesteps`, \(K = \log_2 T\)
+   - Attach constant level code \(k = K\) (ignored in pure FM; keeps interface compatible)
+
+### Training Objective
+
+Model \(f_\theta(x, t, k, y)\) predicts velocity:
+
+$$
+\mathcal{L}_{\text{FM}}
+= \mathbb{E}\Big[\big\| f_\theta(x_t, t, k{=}K, y_{\text{eff}}) - v_t \big\|_2^2\Big],
+$$
+
+where \(y_{\text{eff}}\) are labels after dropout.
+
+### Inference (Uniform N Steps)
+
+Use Euler with uniform steps \(\Delta t = 1/N\):
+
+$$
+x \leftarrow x + \Delta t \cdot f_\theta(x, t, k, y),
+$$
+
+with \(t\) advanced on a fixed grid (e.g. midpoints).
+
+### Notes
+
+- Beta(2,2)-style sampling and clamping away from endpoints improve stability.
+- Sentinel level code \(k = K\) keeps compatibility with \(k\)-conditioned shortcut models.
+
+---
+
+## Shortcut Models
+
+We follow the official paper and JAX repo, with added flexibility.
+
+### Notation
+
+- \(T\): (power-of-two) number of denoising bins  
+- \(K = \log_2 T\)  
+- Dyadic level \(k\) encodes step size:
+
+  $$
+  dt = 2^{-k}
+  $$
+
+- Time \(t \in [0,1]\) and level \(k\) have separate embeddings.  
+- Use small \(\varepsilon \approx 10^{-5}\):
+
+  $$
+  x_t = (1 - (1-\varepsilon)t)\,x_0 + t\,x_1.
+  $$
+
+---
+
+## Shortcut Model Training Procedure
+
+### 1. Sample Step Size `dt` (Bootstrap Slice)
+
+For a bootstrap sub-batch:
+
+- Sample levels \(k \in \{0, \dots, K-1\}\) (uniform or biased to coarse steps).  
+- If batch size is smaller than number of levels, pad with \(k = 0\).
+
+**Outputs:**
+
+- Student level code: \(k\)  
+- Teacher level code: \(k + 1\)  
+- Step sizes: \(dt = 2^{-k}\) and \(dt/2\)
+
+---
+
+### 2. Sample Start Time `t` (Bootstrap Slice)
+
+Given chosen \(dt\):
+
+- Sample:
+
+  $$
+  t \in \{0, dt, 2dt, \dots, 1 - dt\}
+  $$
+
+- Construct \(x_t\) on the linear path (with \(\varepsilon\)).
+
+**Outputs:**
+
+- Start time \(t\)  
+- State \(x_t\)
+
+---
+
+### 3. Bootstrap “Shortcut” Teacher (Local Target)
+
+Use a two-call Heun (trapezoid) estimate at the half-step level:
+
+1. **Predictor**
+
+   $$
+   v_{b1} = f_{\text{teacher}}(x_t, t, \text{level}{+}1, y)
+   $$
+
+2. **Half update**
+
+   $$
+   x_{t_2} = \mathrm{clip}\big(x_t + \tfrac{dt}{2}\,v_{b1}, [-4, 4]\big),
+   \quad
+   t_2 = t + \tfrac{dt}{2}
+   $$
+
+3. **Corrector**
+
+   $$
+   v_{b2} = f_{\text{teacher}}(x_{t_2}, t_2, \text{level}{+}1, y)
+   $$
+
+4. **Local target**
+
+   $$
+   v_{\text{target}} = \tfrac12\,(v_{b1} + v_{b2})
+   $$
+
+Student prediction at full level:
+
+$$
+v_{\text{pred}} = f_\theta(x_t, t, \text{level}, y)
+$$
+
+Loss:
+
+$$
+\big\| v_{\text{pred}} - v_{\text{target}} \big\|_2^2.
+$$
+
+Options:
+
+- Use CFG inside teacher.  
+- Use EMA weights for teacher.
+
+---
+
+### 4. Flow-Matching Targets (Global Supervision)
+
+For the remaining batch items:
+
+1. Sample \(t \sim \{0, \dots, T-1\}/T\).  
+2. Build \(x_t\) as above.  
+3. Set FM target:
+
+   $$
+   v_t = x_1 - (1-\varepsilon)x_0
+   $$
+
+4. Apply label dropout for CFG.  
+5. Attach sentinel level code \(k = K\).
+
+Train with:
+
+$$
+\big\| f_\theta(x_t, t, \text{level}{=}k, y) - v_t \big\|_2^2.
+$$
+
+---
+
+## Merge, Loss, and Diagnostics
+
+- Let per-rank batch size be \(B\).  
+- Let
+
+  $$
+  B_{\text{boot}} = \left\lfloor \frac{B}{\texttt{bootstrap\_every}} \right\rfloor.
+  $$
+
+- Use:
+  - \(B_{\text{boot}}\) samples for shortcut bootstrap.  
+  - \(B - B_{\text{boot}}\) samples for FM.
+
+Concatenate both subsets and average/sum their losses.
+
+---
+
+## Control Flags
+
+- **`bootstrap_every`**  
+  Fraction of the mini-batch used for bootstrap.  
+  Example: `4` → \(1/4\) bootstrap, \(3/4\) FM.
+
+- **`bootstrap_dt_bias`**  
+  (Bins scheme only)  
+  - `0`: uniform over levels \(k\).  
+  - `>0`: bias towards coarser steps (small \(k\), large `dt`), still covering finer levels.
+
+- **`bootstrap_cfg`**  
+  Enables CFG inside teacher:
+
+  $$
+  v_{\text{cfg}} = v_{\text{uncond}} + s\,(v_{\text{cond}} - v_{\text{uncond}})
+  $$
+
+  Student matches this guided target.
+
+- **`bootstrap_ema`**  
+  - On: teacher uses EMA weights (recommended).  
+  - Off: teacher uses live weights (cheaper, noisier).
+
+---
+
+## Practical Defaults
+
+Recommended settings:
+
+- `bootstrap_every` = 4–8  
+- `bootstrap_dt_bias` = 0 initially  
+- `bootstrap_cfg` = 1 (if using CFG at inference)  
+- `bootstrap_ema` = on  
+
+Implementation notes:
+
+- Normalize level code by \(K\) inside the `dt`-embedder.  
+- Keep \(t\) and normalized level code as floats.  
+- Labels are integer class ids.
+
+---
+
+## Actual Sampling in Shortcut Models (Official Implementation)
+
+Let:
+
+- \(M = 128\) (total discretization steps)  
+- \(\log_2(M) = 7\)
+
+The actual scheme:
+
+- Step sizes:
+
+  $$
+  d \in \{1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64\}
+  $$
+
+- Smallest step is \(1/64\), not \(1/128\), because self-consistency uses two steps of size \(d/2\).  
+- For each \(d\), start times:
+
+  $$
+  t \in \{0, d, 2d, \dots, 1-d\}
+  $$
+
+- With `bootstrap_dt_bias = 0`, each dyadic step size appears with equal frequency → uniform over log step sizes.
+
+This yields structured coverage across scales, but the distribution is **fixed** and **not adaptive** to model difficulty.
+
+Our adaptive method modifies the \((t, d)\) sampling distribution based on model error.
+
+---
+
+## Notes on Paper vs Code
+
+- Paper states:
+  - \(t \sim \text{Uniform}[0,1]\)
+  - \(d\) uniformly from \(\{1/M, 2/M, \dots, 1\}\)
+- This uniform \(p_{\text{uni}}(t, d)\) is suboptimal:
+  - Long-range shortcuts (large \(d\)) and high-noise regions (small \(t\)) are harder.
+  - Difficulty is not uniform across \((t, d)\).
+
+- In the code:
+  - They use `dt` and `dt/2` as (step, half-step).  
+  - Paper uses \(2dt\) and \(dt\).  
+
+Be careful when mapping between notations; logic is consistent, only symbols differ.
