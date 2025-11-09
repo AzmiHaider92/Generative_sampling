@@ -18,7 +18,7 @@ $$
 
 ### Setup
 
-Given a data sample $$\(x_1\)$$ and Gaussian noise $$\(x_0 \sim \mathcal{N}(0, I)\)$$, define the linear flow:
+Given a data sample $$x_1$$ and Gaussian noise $$x_0 \sim \mathcal{N}(0, I)$$, define the linear flow:
 
 $$
 x_t = (1 - t)\,x_0 + t\,x_1,\quad t \in [0, 1].
@@ -77,8 +77,9 @@ DiT model $$f_\theta(x, t, k, y)$$ predicts velocity:
 
 $$
 \mathcal{L}_{\text{FM}}
-= \mathbb{E}\big[ \| f_\theta(x_t, t, k{=}K, y_{\text{eff}}) - v_t \|_2^2 \big].
+= \mathbb{E}\left[ \| f_\theta(x_t, t, k{=}K, y_{\text{eff}}) - v_t \|_2^2 \right]
 $$
+
 
 
 where $$y_{\text{eff}}\$$ are labels after dropout.
