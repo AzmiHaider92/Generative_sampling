@@ -1,5 +1,98 @@
 This repository is an unofficial PyTorch implementation of [One Step Diffusion via Shortcut Models](https://arxiv.org/abs/2410.12557) with added explanations and practical notes on the shortcut training scheme and sampling behavior.
 
+Results on Imagenet and CelebA (256x256) - DiT-B/2:
+
+### FID-50k vs. Denoising Steps (DiT-B/2)
+
+**CelebA_HQ (unconditioned)**
+
+| Method           | 128   | 64    | 32    | 16    | 8     | 4      | 2      | 1      |
+|------------------|-------|-------|-------|-------|-------|--------|--------|--------|
+| Flow Matching    | 9.41  | 9.64  | 10.40 | 13.04 | 21.80 | 52.67  | 122.32 | 261.38 |
+| Shortcut Models  | 6.37  | 6.77  | 7.93  | 9.30  | 10.84 | 12.53  | 14.36  | 17.28  |
+
+**ImageNet (class-conditioned)**
+
+| Method           | 128   | 64    | 32    | 16    | 8     | 4      | 2      | 1      |
+|------------------|-------|-------|-------|-------|-------|--------|--------|--------|
+| Flow Matching    | 26.06 | 26.87 | 28.80 | 33.95 | 51.23 | 112.51 | 198.24 | 310.23 |
+| Shortcut Models  | 15.63 | 15.81 | 15.48 | 16.22 | 17.15 | 19.40  | 23.89  | 33.43  |
+
+
+
+### CelebA-HQ: Flow Matching vs Shortcut Models
+
+<p align="center">
+  <!-- 1 step -->
+  <img src="figures/FM_celeba/1.png" width="48%">
+  <img src="figures/SM_celeba/1.png" width="48%"><br>
+  <!-- 2 steps -->
+  <img src="figures/FM_celeba/2.png" width="48%">
+  <img src="figures/SM_celeba/2.png" width="48%"><br>
+  <!-- 4 steps -->
+  <img src="figures/FM_celeba/4.png" width="48%">
+  <img src="figures/SM_celeba/4.png" width="48%"><br>
+  <!-- 8 steps -->
+  <img src="figures/FM_celeba/8.png" width="48%">
+  <img src="figures/SM_celeba/8.png" width="48%"><br>
+  <!-- 16 steps -->
+  <img src="figures/FM_celeba/16.png" width="48%">
+  <img src="figures/SM_celeba/16.png" width="48%"><br>
+  <!-- 32 steps -->
+  <img src="figures/FM_celeba/32.png" width="48%">
+  <img src="figures/SM_celeba/32.png" width="48%"><br>
+  <!-- 64 steps -->
+  <img src="figures/FM_celeba/64.png" width="48%">
+  <img src="figures/SM_celeba/64.png" width="48%"><br>
+  <!-- 128 steps -->
+  <img src="figures/FM_celeba/128.png" width="48%">
+  <img src="figures/SM_celeba/128.png" width="48%">
+</p>
+
+<p align="center">
+  <em>Left: Flow Matching. Right: Shortcut Models. Top → bottom: denoising steps = {1, 2, 4, 8, 16, 32, 64, 128}. Dataset: CelebA-HQ.</em>
+</p>
+
+
+### ImageNet: Flow Matching vs Shortcut Models
+
+<p align="center">
+  <!-- 1 step -->
+  <img src="figures/FM_imagenet/1.png" width="48%">
+  <img src="figures/SM_imagenet/1.png" width="48%"><br>
+  <!-- 2 steps -->
+  <img src="figures/FM_imagenet/2.png" width="48%">
+  <img src="figures/SM_imagenet/2.png" width="48%"><br>
+  <!-- 4 steps -->
+  <img src="figures/FM_imagenet/4.png" width="48%">
+  <img src="figures/SM_imagenet/4.png" width="48%"><br>
+  <!-- 8 steps -->
+  <img src="figures/FM_imagenet/8.png" width="48%">
+  <img src="figures/SM_imagenet/8.png" width="48%"><br>
+  <!-- 16 steps -->
+  <img src="figures/FM_imagenet/16.png" width="48%">
+  <img src="figures/SM_imagenet/16.png" width="48%"><br>
+  <!-- 32 steps -->
+  <img src="figures/FM_imagenet/32.png" width="48%">
+  <img src="figures/SM_imagenet/32.png" width="48%"><br>
+  <!-- 64 steps -->
+  <img src="figures/FM_imagenet/64.png" width="48%">
+  <img src="figures/SM_imagenet/64.png" width="48%"><br>
+  <!-- 128 steps -->
+  <img src="figures/FM_imagenet/128.png" width="48%">
+  <img src="figures/SM_imagenet/128.png" width="48%">
+</p>
+
+<p align="center">
+  <em>Left: Flow Matching. Right: Shortcut Models. Top → bottom: denoising steps = {1, 2, 4, 8, 16, 32, 64, 128}. Dataset: ImageNet.</em>
+</p>
+
+
+
+
+
+
+
 ## Technical Implementation of Shortcut Model (per official repo)
 
 We implement a function that provides training targets (which differ across methods such as flow matching, shortcut models, consistency models, etc.):
