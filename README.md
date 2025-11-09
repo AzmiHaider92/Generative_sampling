@@ -139,8 +139,7 @@ For a bootstrap sub-batch:
 
 Given chosen $$dt$$:
 
-- Uniform sample:
-  $$t \in \{0, dt, 2dt, \dots, 1 - dt\}$$
+- Uniform sample: $$t \in \{0 , dt, 2dt, \dots, 1 - dt\}$$
 - Construct $$x_t$$ on the linear path (with $$\varepsilon$$).
 
 ---
@@ -196,13 +195,6 @@ $$
 $$
 
 ---
-
-## Merge, Loss, and Diagnostics
-
-- Let per-rank batch size be $$B$$.  
-- Let
-
-  $$B_{\text{boot}} = \left\lfloor \frac{B}{\texttt{bootstrap\_every}} \right\rfloor.$$
 
 - Use:
   - $$B_{\text{boot}}$$ samples for shortcut bootstrap.  
