@@ -38,6 +38,10 @@ def validate(
     cfg_scale = cfg.runtime_cfg.inference_cfg_scale
     dt = 1.0 / denoise_timesteps
     K = int(math.log2(denoise_timesteps))  # max level
+    if cfg.model_cfg.train_type == "meanflows":
+        K = 1
+        denoise_timesteps = 1
+        dt = 1.0
     k = torch.full((B,), float(K), device=device, dtype=torch.float32)  # per-sample level code (sentinel)
 
     print(
@@ -77,7 +81,10 @@ def validate(
         x = torch.randn(images_shape, device=device)
 
         for ti in range(denoise_timesteps):
-            t = (ti + 0.5) / denoise_timesteps
+            if cfg.model_cfg.train_type == "meanflows":
+                t = 1
+            else:
+                t = ti / denoise_timesteps
             t_vector = torch.full((B,), t, device=device, dtype=torch.float32)
 
             if cfg_scale == 1:
