@@ -29,6 +29,10 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
+# once, near startup
+torch.backends.cuda.sdp_kernel(enable_flash=False,
+                               enable_math=True,
+                               enable_mem_efficient=False)
 try:
     if torch.multiprocessing.get_start_method(allow_none=True) != "spawn":
         torch.multiprocessing.set_start_method("spawn", force=True)
@@ -157,11 +161,11 @@ def main():
     # ----- method= flow matching / shortcut / adaptive step (learned dt) ... ) -----
     def import_targets(train_type: str):
         name = {
-            "flow_matching": "papers_e2e.flow_matching",
-            "consistency": "papers_e2e.consistency",
-            "shortcut": "papers_e2e.shortcut",
-            "shortcut_cont": "papers_e2e.shortcut_cont",
-            #"adaptive_step": "papers_e2e.adaptive_step"
+            "flow_matching": "papers.flow_matching",
+            "consistency": "papers.consistency",
+            "shortcut": "papers.shortcut",
+            "shortcut_cont": "papers.shortcut_cont",
+            "meanflows": "papers.meanflows"
         }[train_type]
         return importlib.import_module(name).get_targets
     get_targets = import_targets(model_cfg.train_type)
@@ -341,17 +345,7 @@ def main():
         batch_images = maybe_encode(batch_images)
 
         # targets per train_type
-
-        if model_cfg.train_type == 'flow_matching':
-            x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
-        elif model_cfg.train_type == 'consistency':
-            x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
-        elif model_cfg.train_type == 'shortcut':
-            x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
-        elif model_cfg.train_type == 'shortcut_cont':
-            x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
-        else:
-            raise ValueError(f"Unknown train_type: {model_cfg.train_type}")
+        x_t, v_t, t_vec, dt_vec, labels_eff, info = get_targets(cfg, gen, batch_images, batch_labels, call_model, step)
 
         # forward + loss
         opt.zero_grad(set_to_none=True)
