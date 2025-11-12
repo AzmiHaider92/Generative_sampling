@@ -79,21 +79,17 @@ def get_targets(
     dtdt = torch.ones_like(t)
     drdt = torch.zeros_like(r)
 
-    # define network function
-    def u_func(z, t, r):
-        h = t - r
-        return call_model_fn(z, t.view(-1), h.view(-1), labels_dropped)
+    def u_func(z, r_, t_):
+        r_ = r_.view(-1)
+        t_ = t_.view(-1)
+        # Forward-AD works with the math kernel
+        with torch.backends.cuda.sdp_kernel(enable_flash=False,
+                                            enable_mem_efficient=False,
+                                            enable_math=True):
+            return call_model_fn(z, r_, t_, labels_dropped)  # must return a Tensor
 
+    # tangents match shapes of primals
+    _, dudt = torch.func.jvp(u_func, (x_t, r, t), (v_t, drdt, dtdt))
+    u_tgt = (v_t - (t_full - r_full) * dudt).detach()
 
-    # u_pred, dudt = torch.func.jvp(u_func, (z, t, r), (v, dtdt, drdt))
-
-    eps = 1e-3
-    with torch.no_grad():
-        u0 = u_func(x_t, t, r)
-        u1 = u_func(x_t + eps * v_t,
-                    t + eps * dtdt,
-                    r + eps * drdt)
-        dudt = (u1 - u0) / eps
-        u_tgt = (v_t - (t_full - r_full) * dudt).detach()
-
-    return x_t, u_tgt, t, t-r, labels_dropped, None
+    return x_t, u_tgt, r, t, labels_dropped, None
