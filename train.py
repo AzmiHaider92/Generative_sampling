@@ -214,7 +214,8 @@ def main():
         in_channels=C,
         num_classes=runtime_cfg.num_classes,
         mlp_ratio=model_cfg.mlp_ratio,
-        ignore_k=not (model_cfg.train_type.startswith("shortcut")),
+        ignore_k=not (model_cfg.train_type.startswith("shortcut") or
+                      model_cfg.train_type.startswith("meanflows")),
         image_size=H,
     ).to(device)
 
