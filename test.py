@@ -81,10 +81,7 @@ def validate(
         x = torch.randn(images_shape, device=device)
 
         for ti in range(denoise_timesteps):
-            if cfg.model_cfg.train_type == "meanflows":
-                t = 1
-            else:
-                t = ti / denoise_timesteps
+            t = ti / denoise_timesteps
             t_vector = torch.full((B,), t, device=device, dtype=torch.float32)
 
             if cfg_scale == 1:
