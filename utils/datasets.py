@@ -166,7 +166,8 @@ def _get_tiny_imagenet_iter(root: str, per_rank_bs: int, train: bool, debug_over
 
 
 # ----------------- public API -----------------
-def get_dataset(dataset_name: str, dataset_root_dir: str, batch_size: int, train: bool, debug_overfit: int = 0
+def get_dataset(dataset_name: str, dataset_root_dir: str, batch_size: int, train: bool,
+                debug_overfit: int = 0, img_size: int = 256
                ) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
     """
     Returns (images_bchw, labels) on GPU, float32 in [-1,1], BHWC.
@@ -179,9 +180,9 @@ def get_dataset(dataset_name: str, dataset_root_dir: str, batch_size: int, train
     if name.startswith("tiny-imagenet"):
         return _get_tiny_imagenet_iter(dataset_root_dir, batch_size, train, debug_overfit)
     elif name.startswith("celeba"):
-        return _get_celeba_iter(dataset_root_dir, batch_size, train, debug_overfit, image_size=256)
+        return _get_celeba_iter(dataset_root_dir, batch_size, train, debug_overfit, image_size=img_size)
     elif name.startswith(("imagenet", "imagenet2012")):
-        return _get_imagenet_iter(dataset_root_dir, batch_size, train, debug_overfit, image_size=256)
+        return _get_imagenet_iter(dataset_root_dir, batch_size, train, debug_overfit, image_size=img_size)
     else:
         raise ValueError(
             f"Unsupported dataset_name '{dataset_name}'. "

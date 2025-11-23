@@ -42,6 +42,8 @@ def validate(
         K = 1
         denoise_timesteps = 1
         dt = 1.0
+    elif cfg.model_cfg.train_type == "shortcut_raw":
+        K = dt
     k = torch.full((B,), float(K), device=device, dtype=torch.float32)  # per-sample level code (sentinel)
 
     print(

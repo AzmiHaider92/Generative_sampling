@@ -19,6 +19,7 @@ class RuntimeCfg:
     batch_size: int = 32
     max_steps: int = 1_000_000
     debug_overfit: int = 0
+    img_size: int = 256
     mode: str = "train"  # train | inference
     inference_timesteps: int = 30
     inference_cfg_scale: int = 1.0

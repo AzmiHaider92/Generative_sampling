@@ -154,8 +154,8 @@ def main():
     # ----- data -----
     # Iterator that yields (images_bhwc, labels)
     per_rank_bs = max(1, runtime_cfg.batch_size // max(1, world))
-    train_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True, runtime_cfg.debug_overfit)
-    valid_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit)
+    train_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, True, runtime_cfg.debug_overfit, runtime_cfg.img_size)
+    valid_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir, per_rank_bs, False, runtime_cfg.debug_overfit, runtime_cfg.img_size)
     example_images, example_labels = next(train_iter)
 
     # ----- method= flow matching / shortcut / adaptive step (learned dt) ... ) -----
@@ -164,7 +164,9 @@ def main():
             "flow_matching": "papers.flow_matching",
             "consistency": "papers.consistency",
             "shortcut": "papers.shortcut",
+            "shortcut_raw": "papers.shortcut_raw",
             "shortcut_cont": "papers.shortcut_cont",
+            "shortcut_bi": "papers.shortcut_bidirectional",
             "meanflows": "papers.meanflows"
         }[train_type]
         return importlib.import_module(name).get_targets
