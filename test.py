@@ -109,10 +109,10 @@ def validate(
             # Decode last chunk just to verify pipeline
             x1 = x1.to(device, non_blocking=True)
             with torch.inference_mode(), torch.amp.autocast('cuda', torch.float16):
-                x_vis = vae.decode(x1)
-            x_vis = x_vis.clamp(-1.0, 1.0)
-            x1 = (x_vis + 1.0) * 0.5
-            #x1 = x_vis.permute(0, 3, 1, 2)
+                x1 = vae.decode(x1)
+        x1 = x1.clamp(-1.0, 1.0)
+        x1 = (x1 + 1.0) * 0.5
+        #x1 = x_vis.permute(0, 3, 1, 2)
 
         #all_x1.append(x1.detach().cpu().numpy())
         #all_labels.append(labels.detach().cpu().numpy())
