@@ -382,7 +382,7 @@ def main():
                     vimg, vlbl = next(valid_iter)
                 except StopIteration:
                     valid_iter = get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
-                                                  per_rank_bs, False, runtime_cfg.debug_overfit)
+                                                  per_rank_bs, False, runtime_cfg.debug_overfit, runtime_cfg.img_size)
                     vimg, vlbl = next(valid_iter)
 
                 vimg = maybe_encode(vimg)
@@ -416,7 +416,7 @@ def main():
                              ema_model,
                              # pass a real ema_model if you keep a separate module
                              dataset_iter=get_dataset_iter(runtime_cfg.dataset_name, runtime_cfg.dataset_root_dir,
-                                                           per_rank_bs, True, runtime_cfg.debug_overfit),
+                                                           per_rank_bs, True, runtime_cfg.debug_overfit, runtime_cfg.img_size),
                              vae=vae,
                              step=step)
 
