@@ -10,7 +10,7 @@ import os
 from utils.datasets import get_dataset as get_dataset_iter
 import time
 
-from utils.np_utils import sample_ctx_tgt, build_ctx_tgt_viz_images
+from utils.np_utils import build_ctx_tgt_viz_images, sample_ctx_tgt_test
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -76,7 +76,7 @@ def validate(
     for fid_it in tqdm.tqdm(range(max(num_generations // B, 1))):
 
         # batch
-        ctx_tgt_xy, pos = sample_ctx_tgt(
+        ctx_tgt_xy, pos = sample_ctx_tgt_test(
             img_flat=batch_images,
             img_size=cfg.runtime_cfg.img_size,
         )

@@ -148,3 +148,50 @@ def build_ctx_tgt_viz_images(
     # order: all originals, then all ctx, then all ctx+pred
     imgs = torch.stack(orig_list + ctx_list + pred_list, dim=0)  # (3*n_examples, C, H, W)
     return imgs
+
+
+def sample_ctx_tgt_test(img_flat: torch.Tensor, img_size: int, ctx_frac: float = 0.1):
+    """
+    Test-time split where context + target = all pixels, no overlap.
+
+    img_flat: (B, N, C), N = img_size**2
+    """
+    device = img_flat.device
+    B, N, C = img_flat.shape
+    assert N == img_size**2
+
+    # coords for all pixels, same as before
+    pixel_idx = torch.arange(N, device=device)
+    x1 = pixel_idx // img_size
+    x2 = pixel_idx % img_size
+    pos = torch.stack([
+        2.0 * x1.float() / (img_size - 1) - 1.0,
+        2.0 * x2.float() / (img_size - 1) - 1.0,
+    ], dim=-1)          # (N, 2)
+    pos = pos.unsqueeze(0).expand(B, -1, -1)  # (B, N, 2)
+
+    # choose context size
+    ctx_size = int(N * ctx_frac)
+
+    # random permutation per image
+    idxs = torch.rand(B, N, device=device).argsort(dim=-1)  # (B, N)
+
+    ctx_idxs = idxs[..., :ctx_size]      # (B, ctx_size)
+
+    # target = complement of context
+    all_idxs = torch.arange(N, device=device).unsqueeze(0).expand(B, -1)  # (B, N)
+    mask = torch.ones_like(all_idxs, dtype=torch.bool)
+    mask.scatter_(1, ctx_idxs, False)
+    tgt_idxs = all_idxs[mask].view(B, N - ctx_size)  # (B, N - ctx_size)
+
+    batch_idx = torch.arange(B, device=device).unsqueeze(-1)
+
+    ctx_x = pos[batch_idx, ctx_idxs]         # (B, ctx_size, 2)
+    ctx_y = img_flat[batch_idx, ctx_idxs]    # (B, ctx_size, C)
+
+    tgt_x = pos[batch_idx, tgt_idxs]         # (B, N - ctx_size, 2)
+    tgt_y = img_flat[batch_idx, tgt_idxs]    # if you want GT for eval
+
+    ctx_tgt_xy = dict(ctx_x=ctx_x, ctx_y=ctx_y, tgt_x=tgt_x, tgt_y=tgt_y)
+
+    return ctx_tgt_xy, pos
