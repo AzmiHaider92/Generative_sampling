@@ -5,7 +5,7 @@ EPS = 1e-5  # endpoint epsilon for the linear path
 
 
 @torch.no_grad()
-def get_targets(cfg, gen, images, labels, call_model=None, step=None, force_t: float = -1, force_dt: float = -1):
+def get_targets(cfg, gen, ctx_tgt_dict, labels, call_model=None, step=None, force_t: float = -1, force_dt: float = -1):
     # Returns
     # ------------------------------------------------------------------------------------------------------------------
     # x_t: torch.Tensor, shapelike x0 / x1 Interpolated point between x0 and x1 at time t:
@@ -29,12 +29,8 @@ def get_targets(cfg, gen, images, labels, call_model=None, step=None, force_t: f
     #              with probability p=class_dropout_prob, label = num_classes (the null label);
     #              else label = original class id.
 
-    B = images.shape[0]
-    device = images.device
-
-    # label dropout for CFG
-    mask = torch.bernoulli(torch.full((B,), cfg.model_cfg.class_dropout_prob, device=device)).bool()
-    labels_dropped = torch.where(mask, torch.full_like(labels, cfg.runtime_cfg.num_classes if cfg.runtime_cfg.num_classes > 1 else 0), labels)
+    B = ctx_tgt_dict['tgt_y'].shape[0]
+    device = ctx_tgt_dict['tgt_y'].device
 
     T = int(cfg.model_cfg.denoise_timesteps)
     K = int(math.log2(T))  # scalar max level
@@ -51,13 +47,13 @@ def get_targets(cfg, gen, images, labels, call_model=None, step=None, force_t: f
     t = torch.randint(low=0, high=T, size=(B,), device=device, generator=gen)
     t = t / float(T)
 
-    t_full = t.view(B, 1, 1, 1)
+    t_full = t.view(B, 1, 1)
 
     # flow pairs
-    x1 = images
-    x0 = torch.randn(images.shape, dtype=images.dtype, device=images.device, generator=gen)
+    x1 = ctx_tgt_dict['tgt_y']
+    x0 = torch.randn(ctx_tgt_dict['tgt_y'].shape, dtype=ctx_tgt_dict['tgt_y'].dtype, device=device, generator=gen)
 
     x_t = (1.0 - (1.0 - EPS) * t_full) * x0 + t_full * x1
     v_t = x1 - x0
 
-    return x_t, v_t, t, k, labels_dropped, None
+    return x_t, v_t, t, k

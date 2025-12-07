@@ -9,6 +9,9 @@ from torchmetrics.image import FrechetInceptionDistance
 import os
 from utils.datasets import get_dataset as get_dataset_iter
 import time
+
+from utils.np_utils import sample_ctx_tgt, build_ctx_tgt_viz_images
+
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
@@ -27,23 +30,16 @@ def validate(
 ):
     # Pull one batch for shape; JAX also takes shapes from current dataset. :contentReference[oaicite:10]{index=10}
     batch_images, batch_labels = next(dataset_iter)
+    B, C, _, _ = batch_images.shape
     if cfg.model_cfg.use_stable_vae:
         batch_images = vae.encode(batch_images)
-    images_shape = batch_images.shape
-
+    batch_images = batch_images.reshape((B, C, -1)).transpose(1, 2)  # (B, N, C)
     device = batch_images.device
-    B = images_shape[0]
 
     denoise_timesteps = cfg.runtime_cfg.inference_timesteps
     cfg_scale = cfg.runtime_cfg.inference_cfg_scale
     dt = 1.0 / denoise_timesteps
     K = int(math.log2(denoise_timesteps))  # max level
-    if cfg.model_cfg.train_type == "meanflows":
-        K = 1
-        denoise_timesteps = 1
-        dt = 1.0
-    elif cfg.model_cfg.train_type == "shortcut_raw":
-        K = dt
     k = torch.full((B,), float(K), device=device, dtype=torch.float32)  # per-sample level code (sentinel)
 
     print(
@@ -52,10 +48,10 @@ def validate(
     was_training = ema_model.training
     ema_model.eval()
 
-    def call_model(x, t_vector, k, labels):
+    def call_model(yt, ctx_tgt, t_v, k_v):
         m = ema_model
         # model forward expects BHWC and returns v_pred (BHWC)
-        v_pred = m(x, t_vector, k, labels, train=False)
+        v_pred = m(yt, ctx_tgt, t_v, k_v)
         return v_pred
 
     # for fid calc
@@ -78,52 +74,48 @@ def validate(
 
     nimgs_2_vis, imgs_2_vis = 0, []
     for fid_it in tqdm.tqdm(range(max(num_generations // B, 1))):
-        labels = torch.randint(0, cfg.runtime_cfg.num_classes, (B,), device=device, dtype=torch.long)
-        labels_uncond = torch.full_like(labels, cfg.runtime_cfg.num_classes if cfg.runtime_cfg.num_classes > 1 else 0)
-        x = torch.randn(images_shape, device=device)
 
-        for ti in range(denoise_timesteps):
-            t = ti / denoise_timesteps
-            t_vector = torch.full((B,), t, device=device, dtype=torch.float32)
+        # batch
+        ctx_tgt_xy, pos = sample_ctx_tgt(
+            img_flat=batch_images,
+            img_size=cfg.runtime_cfg.img_size,
+        )
+        y1 = ctx_tgt_xy['tgt_y']
+        y_t = torch.randn(ctx_tgt_xy['tgt_y'].shape, dtype=ctx_tgt_xy['tgt_y'].dtype, device=device)
 
-            if cfg_scale == 1:
-                v = call_model(x, t_vector, k, labels)
-            elif cfg_scale == 0:
-                v = call_model(x, t_vector, k, labels_uncond)
-            else:
-                v_uncond = call_model(x, t_vector, k, labels_uncond)
-                v_cond = call_model(x, t_vector, k, labels)
-                v = v_uncond + cfg_scale * (v_cond - v_uncond)  # CFG mix :contentReference[oaicite:15]{index=15}
+        # loop to denoise
+        with torch.no_grad():
+            for ti in range(denoise_timesteps):
+                t = ti / denoise_timesteps
+                t_vector = torch.full((B,), t, device=device, dtype=torch.float32)
+                v = call_model(y_t, ctx_tgt_xy, t_vector, k)
+                y_t = y_t + v * dt
 
-            #if cfg.model_cfg.train_type == 'consistency':
-            #    # Consistency step: x1pred = x + v*(1-t); then blend with fresh eps. :contentReference[oaicite:16]{index=16}
-            #    eps = torch.randn_like(x)
-            #    x1pred = x + v * (1.0 - t)
-            #    x = x1pred * (t + dt) + eps * (1.0 - t - dt)
-            #else:
-                # Euler update
-            x = x + v * dt
-
-        x1 = x.detach().clone()
+        y1_pred = y_t.detach().clone()
         if cfg.model_cfg.use_stable_vae:
             # Decode last chunk just to verify pipeline
-            x1 = x1.to(device, non_blocking=True)
+            y1_pred = y1_pred.to(device, non_blocking=True)
             with torch.inference_mode(), torch.amp.autocast('cuda', torch.float16):
-                x1 = vae.decode(x1)
-        x1 = x1.clamp(-1.0, 1.0)
-        x1 = (x1 + 1.0) * 0.5
-        #x1 = x_vis.permute(0, 3, 1, 2)
-
-        #all_x1.append(x1.detach().cpu().numpy())
-        #all_labels.append(labels.detach().cpu().numpy())
+                y1_pred = vae.decode(y1_pred)
+        #y1_pred = y1_pred.clamp(-1.0, 1.0)
+        #y1_pred = (y1_pred + 1.0) * 0.5
 
         if nimgs_2_vis < 8: # visualize just 8, hardcoded
-            imgs_2_vis.append(x1)
-            nimgs_2_vis += x1.shape[0]
+            imgs = build_ctx_tgt_viz_images(
+                img_flat=batch_images,  # (B, N, C) in [-1,1]
+                ctx_x=ctx_tgt_xy['ctx_x'],
+                ctx_y=ctx_tgt_xy['ctx_y'],
+                tgt_x=ctx_tgt_xy['tgt_x'],
+                pred_y=y1_pred,
+                img_size=cfg.runtime_cfg.img_size,
+                n_examples=8,  # number of columns
+            )
+            imgs_2_vis.append(imgs)
+            nimgs_2_vis += y1_pred.shape[0]
 
         if fid is not None:
             # update FAKE side
-            fid.update(x1, real=False)
+            fid.update(y1_pred, real=False)
 
     # Optional FID computation against provided stats (approximate, subset)
     if fid is not None:
@@ -133,11 +125,25 @@ def validate(
         print(f"============== FID = {score:.4f}  (N={num_generations}) ====================")
 
     imgs = torch.cat(imgs_2_vis, dim=0)
-    imgs = imgs[:8]
 
-    grid = vutils.make_grid(imgs, nrow=4, padding=2, normalize=False)
-    save_image(grid, os.path.join(cfg.runtime_cfg.save_dir, f"generated_img_step{step}_cfg{cfg_scale}_denoise{denoise_timesteps}.png"))
-    wandb.log({"Generated samples": wandb.Image(grid)})
+    grid = vutils.make_grid(
+        imgs,
+        nrow=8,  # == n_examples → 3 rows
+        padding=2,
+        normalize=True,
+        value_range=(-1, 1)
+    )
+
+    # If you really want normalize=False, you can pre-map yourself:
+    # imgs_for_grid = (imgs + 1.0) / 2.0
+    # grid = vutils.make_grid(imgs_for_grid, nrow=8, padding=2, normalize=False)
+
+    save_path = os.path.join(
+        cfg.runtime_cfg.save_dir,
+        f"ctx_tgt_step{step}_cfg{cfg_scale}_denoise{denoise_timesteps}.png"
+    )
+    save_image(grid, save_path)
+    wandb.log({"Ctx/Tgt Predictions": wandb.Image(grid)})
     # Optionally save raw arrays for later analysis
     #if cfg.runtime_cfg.save_dir is not None:
     #    np.save(os.path.join(cfg.runtime_cfg.save_dir, "x0.npy"), np.concatenate(all_x0, axis=0))

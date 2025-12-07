@@ -9,6 +9,7 @@ class RuntimeCfg:
     dataset_name: str = "tiny-imagenet-256"
     dataset_root_dir: str = "./data"
     num_classes: int = 1  #
+    global_batch_size: int = 256 # number of context pixels in conditioning
     load_dir: Optional[str] = None
     save_dir: Optional[str] = None
     fid_stats: Optional[str] = None
