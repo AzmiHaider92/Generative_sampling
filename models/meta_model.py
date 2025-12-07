@@ -302,7 +302,7 @@ class NP_DiT(nn.Module):
         self.h_embedder = nn.Linear(in_channels + 2 * posenc_size, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.k_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size)
+        #self.y_embedder = LabelEmbedder(num_classes, hidden_size) #not used
 
         self.blocks = nn.ModuleList([
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
